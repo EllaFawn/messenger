@@ -6,3 +6,14 @@ export {
   decodeMessagePlaintext,
   type MessagePlaintext,
 } from "./message-plaintext.js";
+export {
+  encryptMessage,
+  decryptMessage,
+  deriveMessageKey,
+  buildMessageSalt,
+  buildMessageInfo,
+  buildMessageAd,
+  type EncryptMessageParams,
+  type DecryptMessageParams,
+} from "./message-crypto.js";
+export { signRequest, verifyRequest } from "./request-signing.js";
