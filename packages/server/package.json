@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "scripts": {
+    "migrate": "tsc -b && node dist/db/migrate-cli.js"
+  },
   "dependencies": {
     "@messager/crypto": "*",
     "@messager/protocol": "*",
