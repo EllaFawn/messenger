@@ -4,8 +4,16 @@
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "scripts": {
+    "migrate": "tsc -b && node dist/db/migrate-cli.js"
+  },
   "dependencies": {
     "@messager/crypto": "*",
-    "@messager/protocol": "*"
+    "@messager/protocol": "*",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1"
   }
 }
