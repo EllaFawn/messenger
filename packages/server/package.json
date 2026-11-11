@@ -6,6 +6,11 @@
   "main": "./dist/index.js",
   "dependencies": {
     "@messager/crypto": "*",
-    "@messager/protocol": "*"
+    "@messager/protocol": "*",
+    "pg": "^8.23.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "@types/pg": "^8.23.1"
   }
 }
