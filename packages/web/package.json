@@ -1,0 +1,10 @@
+{
+  "name": "@messager/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@messager/crypto": "*",
+    "@messager/protocol": "*"
+  }
+}
