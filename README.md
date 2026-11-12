@@ -89,5 +89,10 @@ The dev server only listens on your own machine. Requests to `/api/...` are
 forwarded to the server on port 3000, so the browser talks to one address
 and the server needs no cross-origin (CORS) settings.
 
+On first visit the app asks for the invite code (the `INVITE_CODE` value in
+`.env`), creates your keys in the browser, registers them and shows your
+userID. The private keys are stored only in that browser's IndexedDB;
+clearing the site's data deletes them for good.
+
 `npm run build -w @messager/web` produces the production bundle in
 `packages/web/dist`.
