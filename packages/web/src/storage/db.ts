@@ -1,12 +1,17 @@
 export const DATABASE_NAME = "messager";
 export const IDENTITY_STORE = "identity";
 export const CONTACTS_STORE = "contacts";
+/** Decrypted message history. Exists only in this browser. */
+export const HISTORY_STORE = "history";
+export const HISTORY_BY_CONTACT_INDEX = "contactId";
+/** Per-contact send and receive counters. */
+export const COUNTERS_STORE = "counters";
 
 /**
  * Schema version. To change the schema, add a step to `upgrade` and raise
  * this number; never edit a step that has already shipped.
  */
-const DATABASE_VERSION = 2;
+const DATABASE_VERSION = 3;
 
 function upgrade(db: IDBDatabase, oldVersion: number): void {
   if (oldVersion < 1) {
@@ -14,6 +19,11 @@ function upgrade(db: IDBDatabase, oldVersion: number): void {
   }
   if (oldVersion < 2) {
     db.createObjectStore(CONTACTS_STORE, { keyPath: "userId" });
+  }
+  if (oldVersion < 3) {
+    const history = db.createObjectStore(HISTORY_STORE, { keyPath: "id", autoIncrement: true });
+    history.createIndex(HISTORY_BY_CONTACT_INDEX, "contactId");
+    db.createObjectStore(COUNTERS_STORE, { keyPath: "contactId" });
   }
 }
 

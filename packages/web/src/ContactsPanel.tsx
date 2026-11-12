@@ -1,6 +1,7 @@
 import { computeSafetyNumber } from "@messager/protocol";
 import { useEffect, useState, type FormEvent } from "react";
 import type { ApiClient } from "./api/client.js";
+import { receiveMessages } from "./chat.js";
 import {
   acceptChangedKey,
   addContact,
@@ -10,6 +11,7 @@ import {
   rejectChangedKey,
   type Contact,
 } from "./contacts.js";
+import { Conversation } from "./Conversation.js";
 import type { StoredIdentity } from "./identity.js";
 import { describeError } from "./session.js";
 import { listContacts } from "./storage/contact-store.js";
@@ -20,7 +22,41 @@ interface ContactsPanelProps {
   me: StoredIdentity;
 }
 
+/** How often to check the server for new messages. Replaced by push notifications later. */
+const POLL_INTERVAL_MS = 3000;
+
 export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
+  const [inboxTick, setInboxTick] = useState(0);
+  const [unknownSenders, setUnknownSenders] = useState<string[]>([]);
+  const [inboxError, setInboxError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let running = false;
+    async function poll() {
+      // Never overlap two checks; a slow one simply delays the next.
+      if (running) return;
+      running = true;
+      try {
+        const result = await receiveMessages({ db, client, me });
+        if (cancelled) return;
+        setInboxError(null);
+        setUnknownSenders(result.unknownSenders);
+        if (result.stored > 0) setInboxTick((tick) => tick + 1);
+      } catch (caught) {
+        if (!cancelled) setInboxError(describeError(caught));
+      } finally {
+        running = false;
+      }
+    }
+    void poll();
+    const timer = setInterval(() => void poll(), POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [db, client, me]);
+
   const [contacts, setContacts] = useState<Contact[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -68,6 +104,19 @@ export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
         onAdd={(userId, name) => run(() => addContact({ db, client, me, userId, name }))}
       />
       {error !== null && <p role="alert">{error}</p>}
+      {inboxError !== null && <p role="alert">Could not check for new messages: {inboxError}</p>}
+      {unknownSenders.length > 0 && (
+        <div>
+          <p>Messages are waiting from people who are not in your contacts. Add them to read the messages:</p>
+          <ul>
+            {unknownSenders.map((userId) => (
+              <li key={userId}>
+                <code>{userId}</code>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {contacts === null && <p>Loading…</p>}
       {contacts !== null && contacts.length === 0 && <p>No contacts yet.</p>}
       {contacts !== null && contacts.length > 0 && (
@@ -80,6 +129,7 @@ export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
                 onAccept={() => run(() => acceptChangedKey(db, contact.userId))}
                 onReject={() => run(() => rejectChangedKey(db, contact.userId))}
               />
+              <Conversation db={db} client={client} me={me} contact={contact} inboxTick={inboxTick} />
             </li>
           ))}
         </ul>
