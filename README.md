@@ -94,5 +94,10 @@ On first visit the app asks for the invite code (the `INVITE_CODE` value in
 userID. The private keys are stored only in that browser's IndexedDB;
 clearing the site's data deletes them for good.
 
+Add a contact by pasting their userID; each contact shows a safety number
+to compare out of band and a conversation. The app checks the server for
+new messages every few seconds. To try it alone, use a normal window and a
+private window as two separate users.
+
 `npm run build -w @messager/web` produces the production bundle in
 `packages/web/dist`.
