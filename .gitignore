@@ -16,3 +16,4 @@ Thumbs.db
 
 # logs
 npm-debug.log*
+.tsbuild/
