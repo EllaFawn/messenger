@@ -76,3 +76,18 @@ Routes so far:
 
 Signed requests carry `X-User-ID`, `X-Timestamp`, `X-Nonce` and
 `X-Signature`; see design section 4.
+
+## Running the web app
+
+With the server running in one terminal, start the web app in another:
+
+```
+npm run dev -w @messager/web            # http://127.0.0.1:5173
+```
+
+The dev server only listens on your own machine. Requests to `/api/...` are
+forwarded to the server on port 3000, so the browser talks to one address
+and the server needs no cross-origin (CORS) settings.
+
+`npm run build -w @messager/web` produces the production bundle in
+`packages/web/dist`.

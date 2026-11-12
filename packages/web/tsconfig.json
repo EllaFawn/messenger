@@ -1,11 +1,25 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "./dist",
+    "outDir": "./.tsbuild",
     "rootDir": "./src",
-    "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "jsx": "react-jsx"
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "jsx": "react-jsx",
+    "emitDeclarationOnly": true
   },
-  "include": ["src"],
-  "references": [{ "path": "../crypto" }, { "path": "../protocol" }]
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../crypto"
+    },
+    {
+      "path": "../protocol"
+    }
+  ]
 }

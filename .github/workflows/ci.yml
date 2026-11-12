@@ -52,6 +52,9 @@ jobs:
 
       - run: npm test
 
+      # Catches a web app that type-checks but cannot be bundled.
+      - run: npm run build -w @messager/web
+
       # Tests run against TypeScript source; this checks the compiled server
       # (built by the typecheck step) actually starts under plain Node.
       - name: Smoke test compiled server
