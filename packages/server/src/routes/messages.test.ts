@@ -1,7 +1,8 @@
 import * as crypto from "@messager/crypto";
-import { encodeEnvelope } from "@messager/protocol";
+import { decryptMessage, encodeEnvelope, encryptMessage, type Envelope } from "@messager/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp, MAX_BODY_BYTES } from "../app.js";
+import { INBOX_PAGE_SIZE } from "./messages.js";
 import { migrate } from "../db/migrate.js";
 import { createTestDatabase, type TestDatabase } from "../db/test-db.js";
 import { insertUser, makeIdentity, signedFetch, type TestIdentity } from "../test-client.js";
@@ -197,5 +198,170 @@ describe("POST /messages", () => {
     const envelope = envelopeTo(bob.userId);
     const text = await (await send(alice, envelope)).text();
     expect(text).not.toContain(envelope.ciphertext as string);
+  });
+});
+
+interface InboxItem {
+  message_id: string;
+  from: string;
+  v: number;
+  nonce: string;
+  ciphertext: string;
+  created_at: string;
+}
+
+async function inbox(who: TestIdentity): Promise<InboxItem[]> {
+  const res = await signedFetch(server.url, who, "/messages/inbox", { timestamp: NOW });
+  expect(res.status).toBe(200);
+  return (await res.json()) as InboxItem[];
+}
+
+/** Inserts a message directly, with a chosen age so ordering is predictable. */
+async function insertMessage(from: TestIdentity, to: TestIdentity, secondsAgo: number): Promise<string> {
+  const result = await db.pool.query<{ message_id: string }>(
+    `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
+     VALUES ($1, $2, $3, $4, now() - make_interval(secs => $5))
+     RETURNING message_id`,
+    [from.userId, to.userId, Buffer.from(crypto.randomBytes(24)), Buffer.from(crypto.randomBytes(32)), secondsAgo],
+  );
+  return result.rows[0]!.message_id;
+}
+
+describe("GET /messages/inbox", () => {
+  it("returns an empty list when there is nothing waiting", async () => {
+    expect(await inbox(bob)).toEqual([]);
+  });
+
+  it("returns a sent message with exactly the documented fields", async () => {
+    const envelope = envelopeTo(bob.userId);
+    const sent = (await (await send(alice, envelope)).json()) as { message_id: string; created_at: string };
+
+    const items = await inbox(bob);
+    expect(items).toEqual([
+      {
+        message_id: sent.message_id,
+        from: alice.userId,
+        v: 1,
+        nonce: envelope.nonce,
+        ciphertext: envelope.ciphertext,
+        created_at: sent.created_at,
+      },
+    ]);
+  });
+
+  it("delivers a message the recipient can decrypt", async () => {
+    const message = { counter: 1, text: "hello bob", sentAt: NOW };
+    const envelope = encryptMessage({
+      message,
+      fromUserId: alice.userId,
+      toUserId: bob.userId,
+      myExchangePrivateKey: alice.exchange.privateKey,
+      theirExchangePublicKey: bob.exchange.publicKey,
+    });
+    expect((await send(alice, envelope)).status).toBe(201);
+
+    const [item] = await inbox(bob);
+    const received: Envelope = { v: 1, to: bob.userId, nonce: item!.nonce, ciphertext: item!.ciphertext };
+    expect(
+      decryptMessage({
+        envelope: received,
+        fromUserId: item!.from,
+        toUserId: bob.userId,
+        myExchangePrivateKey: bob.exchange.privateKey,
+        theirExchangePublicKey: alice.exchange.publicKey,
+      }),
+    ).toEqual(message);
+  });
+
+  it("returns messages oldest first", async () => {
+    const newest = await insertMessage(alice, bob, 10);
+    const oldest = await insertMessage(alice, bob, 30);
+    const middle = await insertMessage(alice, bob, 20);
+    expect((await inbox(bob)).map((m) => m.message_id)).toEqual([oldest, middle, newest]);
+  });
+
+  it("returns only messages addressed to the caller", async () => {
+    const carol = makeIdentity();
+    await insertUser(db.pool, carol);
+    const forBob = await insertMessage(alice, bob, 3);
+    await insertMessage(alice, carol, 2);
+    await insertMessage(bob, alice, 1);
+
+    expect((await inbox(bob)).map((m) => m.message_id)).toEqual([forBob]);
+    expect(await inbox(carol)).toHaveLength(1);
+    expect((await inbox(alice)).every((m) => m.from === bob.userId)).toBe(true);
+  });
+
+  it("does not show the sender their own sent messages", async () => {
+    await insertMessage(alice, bob, 1);
+    expect(await inbox(alice)).toEqual([]);
+  });
+
+  it("keeps returning a message until it is acknowledged", async () => {
+    const id = await insertMessage(alice, bob, 1);
+    expect((await inbox(bob)).map((m) => m.message_id)).toEqual([id]);
+    expect((await inbox(bob)).map((m) => m.message_id)).toEqual([id]);
+  });
+
+  it("records when a message was first fetched and never changes it", async () => {
+    const id = await insertMessage(alice, bob, 1);
+    const deliveredAt = async (): Promise<Date | null> =>
+      (await db.pool.query("SELECT delivered_at FROM messages WHERE message_id = $1", [id])).rows[0]
+        .delivered_at;
+
+    expect(await deliveredAt()).toBeNull();
+    await inbox(bob);
+    const first = await deliveredAt();
+    expect(first).toBeInstanceOf(Date);
+    await inbox(bob);
+    expect((await deliveredAt())!.getTime()).toBe(first!.getTime());
+  });
+
+  it("does not mark messages as fetched when someone else checks their inbox", async () => {
+    const id = await insertMessage(alice, bob, 1);
+    await inbox(alice);
+    const row = (await db.pool.query("SELECT delivered_at FROM messages WHERE message_id = $1", [id])).rows[0];
+    expect(row.delivered_at).toBeNull();
+  });
+
+  it("returns at most one page, starting with the oldest", async () => {
+    const extra = 3;
+    await db.pool.query(
+      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
+       SELECT $1, $2, $3, $4, now() - make_interval(secs => n)
+       FROM generate_series(1, $5::int) AS n`,
+      [alice.userId, bob.userId, Buffer.alloc(24), Buffer.alloc(16), INBOX_PAGE_SIZE + extra],
+    );
+
+    const items = await inbox(bob);
+    expect(items).toHaveLength(INBOX_PAGE_SIZE);
+    const times = items.map((m) => Date.parse(m.created_at));
+    expect([...times].sort((a, b) => a - b)).toEqual(times);
+
+    // The newest few are the ones left out and stay unfetched.
+    const unfetched = await db.pool.query(
+      "SELECT count(*)::int AS n FROM messages WHERE delivered_at IS NULL",
+    );
+    expect(unfetched.rows[0].n).toBe(extra);
+  });
+
+  it("rejects an unsigned request", async () => {
+    await insertMessage(alice, bob, 1);
+    const res = await fetch(`${server.url}/messages/inbox`);
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: "unauthorized" });
+  });
+
+  it("rejects a caller who is not registered", async () => {
+    const res = await signedFetch(server.url, makeIdentity(), "/messages/inbox", { timestamp: NOW });
+    expect(res.status).toBe(401);
+  });
+
+  it("rejects a request signed for a different path", async () => {
+    const res = await signedFetch(server.url, bob, "/messages/inbox", {
+      timestamp: NOW,
+      signAs: { path: `/users/${bob.userId}/pubkeys` },
+    });
+    expect(res.status).toBe(401);
   });
 });

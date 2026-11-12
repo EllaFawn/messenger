@@ -117,7 +117,7 @@ auth_nonces (
 );
 ```
 
-- `delivered_at` set on inbox fetch; row **deleted on ack**. Server retains ciphertext only during the delivery window. No signature column.
+- `delivered_at` set on first inbox fetch (informational only); row **deleted on ack**. The inbox returns every un-acked message, not just unfetched ones, so a client that crashes between fetch and save does not lose a message; the plaintext counter discards repeats. Server retains ciphertext only during the delivery window. No signature column.
 - Ciphertext is an opaque blob — M2 ratchet ciphertext needs no schema change; prekey/session tables at M2 are additive.
 
 ## 6. API
@@ -127,7 +127,7 @@ POST /register                  { userID, identity_pubkey, exchange_pubkey, invi
 GET  /users/:userID/pubkeys                                   (signed)
 POST /messages                  { v, to, nonce, ciphertext }  (signed)
 GET  /messages/inbox                                          (signed)
-  → [{ message_id, from, v, nonce, ciphertext, created_at }] undelivered for caller
+  → [{ message_id, from, v, nonce, ciphertext, created_at }] unacknowledged for caller, oldest first, max 100
 POST /messages/:id/ack                                        (signed) → deletes row (only recipient may ack)
 ```
 

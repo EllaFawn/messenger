@@ -12,6 +12,9 @@ const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/
 /** A ciphertext always carries a 16-byte Poly1305 tag, so nothing shorter can be genuine. */
 const MIN_CIPHERTEXT_BYTES = 16;
 
+/** Most messages returned by one inbox fetch. Acknowledging them brings the next ones into view. */
+export const INBOX_PAGE_SIZE = 100;
+
 interface IncomingEnvelope {
   to: string;
   nonce: Buffer;
@@ -78,6 +81,47 @@ export function messagesRouter(deps: AuthDeps): Router {
     }
 
     res.status(201).json({ message_id: row.message_id, created_at: row.created_at.toISOString() });
+  });
+
+  // Every message for the caller that has not been acknowledged yet, oldest first.
+  // A message keeps coming back until it is acked, so a client that crashes
+  // between fetching and saving does not lose it; the client's counter check
+  // discards repeats. delivered_at only records the first fetch.
+  router.get("/messages/inbox", requireSignedRequest(deps), async (_req, res) => {
+    const caller = authenticatedUserId(res);
+
+    const result = await deps.pool.query<{
+      message_id: string;
+      from_user_id: string;
+      nonce: Buffer;
+      ciphertext: Buffer;
+      created_at: Date;
+    }>(
+      `WITH page AS (
+         SELECT message_id FROM messages
+         WHERE to_user_id = $1
+         ORDER BY created_at, message_id
+         LIMIT $2
+       ), marked AS (
+         UPDATE messages SET delivered_at = now()
+         WHERE message_id IN (SELECT message_id FROM page) AND delivered_at IS NULL
+       )
+       SELECT m.message_id, m.from_user_id, m.nonce, m.ciphertext, m.created_at
+       FROM messages m JOIN page USING (message_id)
+       ORDER BY m.created_at, m.message_id`,
+      [caller, INBOX_PAGE_SIZE],
+    );
+
+    res.json(
+      result.rows.map((row) => ({
+        message_id: row.message_id,
+        from: row.from_user_id,
+        v: 1,
+        nonce: row.nonce.toString("base64"),
+        ciphertext: row.ciphertext.toString("base64"),
+        created_at: row.created_at.toISOString(),
+      })),
+    );
   });
 
   return router;
