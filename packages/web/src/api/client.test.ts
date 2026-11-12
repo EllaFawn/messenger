@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { verifyRequest } from "@messager/protocol";
+import { verifyExchangeKey, verifyRequest } from "@messager/protocol";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createIdentity, type StoredIdentity } from "../identity.js";
 import { ApiError, createApiClient, type ApiClient } from "./client.js";
@@ -176,12 +176,21 @@ describe("register", () => {
     const request = seen[0]!;
     expect(request.method).toBe("POST");
     expect(request.url).toBe("/api/register");
-    expect(JSON.parse(request.body!)).toEqual({
+    const body = JSON.parse(request.body!) as Record<string, string>;
+    expect(body).toEqual({
       userID: identity.userId,
       identity_pubkey: crypto.toBase64(identity.identityPublicKey),
       exchange_pubkey: crypto.toBase64(identity.exchangePublicKey),
+      exchange_sig: body.exchange_sig,
       inviteCode: "the-invite-code-0123456789",
     });
+    expect(
+      verifyExchangeKey(
+        identity.exchangePublicKey,
+        crypto.fromBase64(body.exchange_sig!),
+        identity.identityPublicKey,
+      ),
+    ).toBe(true);
     expect(signatureIsValid(request, "/register")).toBe(true);
   });
 

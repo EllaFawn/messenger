@@ -1,4 +1,5 @@
 import * as crypto from "@messager/crypto";
+import { deriveUserId, verifyExchangeKey } from "@messager/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
 import { migrate } from "../db/migrate.js";
@@ -43,6 +44,7 @@ describe("GET /users/:userID/pubkeys", () => {
       userID: bob.userId,
       identity_pubkey: crypto.toBase64(bob.identity.publicKey),
       exchange_pubkey: crypto.toBase64(bob.exchange.publicKey),
+      exchange_sig: crypto.toBase64(bob.exchangeSig),
     });
   });
 
@@ -78,11 +80,21 @@ describe("GET /users/:userID/pubkeys", () => {
     expect(res.status).toBe(401);
   });
 
+  it("returns a signature that proves the exchange key belongs to the userID", async () => {
+    const res = await signedFetch(server.url, alice, `/users/${bob.userId}/pubkeys`, { timestamp: NOW });
+    const keys = (await res.json()) as { identity_pubkey: string; exchange_pubkey: string; exchange_sig: string };
+    const identityKey = crypto.fromBase64(keys.identity_pubkey);
+    expect(deriveUserId(identityKey)).toBe(bob.userId);
+    expect(
+      verifyExchangeKey(crypto.fromBase64(keys.exchange_pubkey), crypto.fromBase64(keys.exchange_sig), identityKey),
+    ).toBe(true);
+  });
+
   it("never returns private key material", async () => {
     const res = await signedFetch(server.url, alice, `/users/${bob.userId}/pubkeys`, { timestamp: NOW });
     const text = await res.text();
     expect(text).not.toContain(crypto.toBase64(bob.identity.privateKey));
     expect(text).not.toContain(crypto.toBase64(bob.exchange.privateKey));
-    expect(Object.keys(JSON.parse(text)).sort()).toEqual(["exchange_pubkey", "identity_pubkey", "userID"]);
+    expect(Object.keys(JSON.parse(text)).sort()).toEqual(["exchange_pubkey", "exchange_sig", "identity_pubkey", "userID"]);
   });
 });

@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { deriveUserId, signRequest } from "@messager/protocol";
+import { deriveUserId, signExchangeKey, signRequest } from "@messager/protocol";
 import type { Pool } from "./db/pool.js";
 
 /** A throwaway user for tests: both keypairs plus the derived userID. */
@@ -7,23 +7,31 @@ export interface TestIdentity {
   userId: string;
   identity: crypto.KeyPair;
   exchange: crypto.KeyPair;
+  /** The identity key's signature over the exchange public key. */
+  exchangeSig: Uint8Array;
 }
 
 export function makeIdentity(): TestIdentity {
   const identity = crypto.generateIdentityKeyPair();
+  const exchange = crypto.generateExchangeKeyPair();
   return {
     userId: deriveUserId(identity.publicKey),
     identity,
-    exchange: crypto.generateExchangeKeyPair(),
+    exchange,
+    exchangeSig: signExchangeKey(exchange.publicKey, identity.privateKey),
   };
 }
 
 export async function insertUser(pool: Pool, who: TestIdentity): Promise<void> {
-  await pool.query("INSERT INTO users (user_id, identity_pubkey, exchange_pubkey) VALUES ($1, $2, $3)", [
-    who.userId,
-    Buffer.from(who.identity.publicKey),
-    Buffer.from(who.exchange.publicKey),
-  ]);
+  await pool.query(
+    "INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig) VALUES ($1, $2, $3, $4)",
+    [
+      who.userId,
+      Buffer.from(who.identity.publicKey),
+      Buffer.from(who.exchange.publicKey),
+      Buffer.from(who.exchangeSig),
+    ],
+  );
 }
 
 export interface SignedFetchOptions {

@@ -17,3 +17,9 @@ export {
   type DecryptMessageParams,
 } from "./message-crypto.js";
 export { signRequest, verifyRequest } from "./request-signing.js";
+export {
+  signExchangeKey,
+  verifyExchangeKey,
+  buildExchangeKeyStatement,
+  EXCHANGE_KEY_SIGNATURE_BYTES,
+} from "./exchange-key-signature.js";

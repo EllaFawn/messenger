@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { signRequest } from "@messager/protocol";
+import { signExchangeKey, signRequest } from "@messager/protocol";
 import type { StoredIdentity } from "../identity.js";
 
 /** The browser reaches the server through this same-origin prefix; see vite.config.ts. */
@@ -121,6 +121,8 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
       userID: identity.userId,
       identity_pubkey: crypto.toBase64(identity.identityPublicKey),
       exchange_pubkey: crypto.toBase64(identity.exchangePublicKey),
+      // The identity key vouches for the exchange key, so contacts can verify it from the userID alone.
+      exchange_sig: crypto.toBase64(signExchangeKey(identity.exchangePublicKey, identity.identityPrivateKey)),
       inviteCode,
     });
     const confirmed =
