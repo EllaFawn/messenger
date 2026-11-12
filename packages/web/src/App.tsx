@@ -1,6 +1,7 @@
 import * as crypto from "@messager/crypto";
 import { useEffect, useState, type FormEvent } from "react";
 import { createApiClient } from "./api/client.js";
+import { ContactsPanel } from "./ContactsPanel.js";
 import { describeError, loadSession, signUp, type Session } from "./session.js";
 import { openDatabase } from "./storage/db.js";
 
@@ -51,17 +52,20 @@ export function App() {
         />
       )}
       {state.phase === "ready" && state.session.status === "registered" && (
-        <section>
-          <h2>Your identity</h2>
-          <p>You are registered. Give this ID to the person you want to talk to:</p>
-          <p>
-            <code>{state.session.identity.userId}</code>
-          </p>
-          <p>
-            Your keys are stored only in this browser. Clearing this site's data deletes them, and they
-            cannot be recovered.
-          </p>
-        </section>
+        <>
+          <section>
+            <h2>Your identity</h2>
+            <p>You are registered. Give this ID to the person you want to talk to:</p>
+            <p>
+              <code>{state.session.identity.userId}</code>
+            </p>
+            <p>
+              Your keys are stored only in this browser. Clearing this site's data deletes them, and they
+              cannot be recovered.
+            </p>
+          </section>
+          <ContactsPanel db={state.db} client={client} me={state.session.identity} />
+        </>
       )}
     </main>
   );
