@@ -5,7 +5,8 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "migrate": "tsc -b && node dist/db/migrate-cli.js"
+    "migrate": "tsc -b && node --env-file-if-exists=../../.env dist/db/migrate-cli.js",
+    "start": "tsc -b && node --env-file-if-exists=../../.env dist/index.js"
   },
   "dependencies": {
     "@messager/crypto": "*",
