@@ -1,6 +1,6 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import * as crypto from "@messager/crypto";
-import { deriveUserId } from "@messager/protocol";
+import { deriveUserId, verifyExchangeKey } from "@messager/protocol";
 import { Router } from "express";
 import {
   parseSignedHeaders,
@@ -18,12 +18,15 @@ export interface RegisterDeps extends AuthDeps {
 
 /** Standard base64 of exactly 32 bytes. */
 const KEY_PATTERN = /^[A-Za-z0-9+/]{43}=$/;
+/** Standard base64 of exactly 64 bytes (an Ed25519 signature). */
+const SIGNATURE_PATTERN = /^[A-Za-z0-9+/]{86}==$/;
 const MAX_INVITE_CODE_LENGTH = 256;
 
 interface RegistrationBody {
   userID: string;
   identity_pubkey: string;
   exchange_pubkey: string;
+  exchange_sig: string;
   inviteCode: string;
 }
 
@@ -31,21 +34,23 @@ function parseRegistrationBody(body: unknown): RegistrationBody | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return null;
   }
-  const { userID, identity_pubkey, exchange_pubkey, inviteCode } = body as Record<string, unknown>;
+  const { userID, identity_pubkey, exchange_pubkey, exchange_sig, inviteCode } = body as Record<string, unknown>;
   if (
     typeof userID !== "string" ||
     typeof identity_pubkey !== "string" ||
     typeof exchange_pubkey !== "string" ||
+    typeof exchange_sig !== "string" ||
     typeof inviteCode !== "string" ||
     !USER_ID_PATTERN.test(userID) ||
     !KEY_PATTERN.test(identity_pubkey) ||
     !KEY_PATTERN.test(exchange_pubkey) ||
+    !SIGNATURE_PATTERN.test(exchange_sig) ||
     inviteCode.length === 0 ||
     inviteCode.length > MAX_INVITE_CODE_LENGTH
   ) {
     return null;
   }
-  return { userID, identity_pubkey, exchange_pubkey, inviteCode };
+  return { userID, identity_pubkey, exchange_pubkey, exchange_sig, inviteCode };
 }
 
 /** Compares hashes in constant time so response timing does not reveal how much of the code matched. */
@@ -68,9 +73,15 @@ export function registerRouter(deps: RegisterDeps): Router {
     await crypto.ready;
     const identityPublicKey = crypto.fromBase64(body.identity_pubkey);
     const exchangePublicKey = crypto.fromBase64(body.exchange_pubkey);
+    const exchangeSignature = crypto.fromBase64(body.exchange_sig);
 
-    // 1. The userID must be derived from the identity key being registered.
-    if (deriveUserId(identityPublicKey) !== body.userID) {
+    // 1. The userID must be derived from the identity key being registered,
+    //    and that identity key must vouch for the exchange key. Other clients
+    //    check the same signature, so a bad one is refused rather than stored.
+    if (
+      deriveUserId(identityPublicKey) !== body.userID ||
+      !verifyExchangeKey(exchangePublicKey, exchangeSignature, identityPublicKey)
+    ) {
       res.status(400).json({ error: "invalid_request" });
       return;
     }
@@ -101,10 +112,15 @@ export function registerRouter(deps: RegisterDeps): Router {
 
     // Existing users are never overwritten, so stored keys cannot be replaced.
     const inserted = await deps.pool.query(
-      `INSERT INTO users (user_id, identity_pubkey, exchange_pubkey)
-       VALUES ($1, $2, $3)
+      `INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig)
+       VALUES ($1, $2, $3, $4)
        ON CONFLICT (user_id) DO NOTHING`,
-      [body.userID, Buffer.from(identityPublicKey), Buffer.from(exchangePublicKey)],
+      [
+        body.userID,
+        Buffer.from(identityPublicKey),
+        Buffer.from(exchangePublicKey),
+        Buffer.from(exchangeSignature),
+      ],
     );
     if (inserted.rowCount !== 1) {
       res.status(409).json({ error: "already_registered" });

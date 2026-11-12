@@ -1,4 +1,5 @@
 import * as crypto from "@messager/crypto";
+import { signExchangeKey } from "@messager/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
 import { TIMESTAMP_WINDOW_MS } from "../auth/signed-request.js";
@@ -36,6 +37,7 @@ function registrationBody(who: TestIdentity, overrides: Record<string, unknown> 
     userID: who.userId,
     identity_pubkey: crypto.toBase64(who.identity.publicKey),
     exchange_pubkey: crypto.toBase64(who.exchange.publicKey),
+    exchange_sig: crypto.toBase64(who.exchangeSig),
     inviteCode: INVITE,
     ...overrides,
   });
@@ -67,6 +69,34 @@ describe("POST /register", () => {
     expect(stored.rows[0].user_id).toBe(alice.userId);
     expect(new Uint8Array(stored.rows[0].identity_pubkey)).toEqual(alice.identity.publicKey);
     expect(new Uint8Array(stored.rows[0].exchange_pubkey)).toEqual(alice.exchange.publicKey);
+    expect(new Uint8Array(stored.rows[0].exchange_sig)).toEqual(alice.exchangeSig);
+  });
+
+  describe("exchange-key signature", () => {
+    it("rejects an exchange key that the identity key did not sign", async () => {
+      // A correctly signed request, but the exchange key is not the one the signature vouches for.
+      const otherKey = crypto.toBase64(makeIdentity().exchange.publicKey);
+      const res = await register(alice, registrationBody(alice, { exchange_pubkey: otherKey }));
+      await expectRejected(res, 400, "invalid_request");
+    });
+
+    it("rejects a signature made by someone else's identity key", async () => {
+      const mallory = makeIdentity();
+      const forged = signExchangeKey(alice.exchange.publicKey, mallory.identity.privateKey);
+      const res = await register(alice, registrationBody(alice, { exchange_sig: crypto.toBase64(forged) }));
+      await expectRejected(res, 400, "invalid_request");
+    });
+
+    it.each([
+      ["missing", undefined],
+      ["of the wrong length", Buffer.alloc(63).toString("base64")],
+      ["not base64", "!".repeat(88)],
+      ["not text", 12345],
+      ["all zero bytes", Buffer.alloc(64).toString("base64")],
+    ])("rejects a signature that is %s", async (_label, value) => {
+      const res = await register(alice, registrationBody(alice, { exchange_sig: value }));
+      await expectRejected(res, 400, "invalid_request");
+    });
   });
 
   it("lets the new user make signed requests straight away", async () => {
@@ -115,10 +145,13 @@ describe("POST /register", () => {
     });
 
     it("rejects a body changed after signing", async () => {
-      const attackerKey = crypto.toBase64(makeIdentity().exchange.publicKey);
-      const res = await register(alice, registrationBody(alice, { exchange_pubkey: attackerKey }), {
-        signAs: { body: registrationBody(alice) },
+      // The swapped-in exchange key is validly signed, so only the request signature can catch the change.
+      const attackerKey = makeIdentity().exchange.publicKey;
+      const tampered = registrationBody(alice, {
+        exchange_pubkey: crypto.toBase64(attackerKey),
+        exchange_sig: crypto.toBase64(signExchangeKey(attackerKey, alice.identity.privateKey)),
       });
+      const res = await register(alice, tampered, { signAs: { body: registrationBody(alice) } });
       await expectRejected(res, 401, "unauthorized");
     });
 
@@ -152,7 +185,14 @@ describe("POST /register", () => {
       await register(alice, registrationBody(alice));
       const newExchangeKey = makeIdentity().exchange.publicKey;
 
-      const res = await register(alice, registrationBody(alice, { exchange_pubkey: crypto.toBase64(newExchangeKey) }));
+      // Properly signed by Alice's own identity key, so only the "already registered" rule can stop it.
+      const res = await register(
+        alice,
+        registrationBody(alice, {
+          exchange_pubkey: crypto.toBase64(newExchangeKey),
+          exchange_sig: crypto.toBase64(signExchangeKey(newExchangeKey, alice.identity.privateKey)),
+        }),
+      );
 
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({ error: "already_registered" });

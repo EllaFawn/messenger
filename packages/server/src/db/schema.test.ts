@@ -22,10 +22,17 @@ beforeEach(async () => {
   await db.pool.query("TRUNCATE messages, auth_nonces, users");
 });
 
-function insertUser(userId: string, identityKey: Buffer = KEY_A, exchangeKey: Buffer = KEY_B) {
+const SIG = Buffer.alloc(64, 3);
+
+function insertUser(
+  userId: string,
+  identityKey: Buffer = KEY_A,
+  exchangeKey: Buffer = KEY_B,
+  exchangeSig: Buffer | null = SIG,
+) {
   return db.pool.query(
-    "INSERT INTO users (user_id, identity_pubkey, exchange_pubkey) VALUES ($1, $2, $3) RETURNING *",
-    [userId, identityKey, exchangeKey],
+    "INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig) VALUES ($1, $2, $3, $4) RETURNING *",
+    [userId, identityKey, exchangeKey, exchangeSig],
   );
 }
 
@@ -68,6 +75,19 @@ describe("initial schema", () => {
 
     it("rejects an exchange key that is not 32 bytes", async () => {
       await expect(insertUser("alice", KEY_A, Buffer.alloc(33, 2))).rejects.toThrow(/exchange_pubkey/);
+    });
+
+    it("stores the exchange-key signature", async () => {
+      const result = await insertUser("alice");
+      expect(result.rows[0].exchange_sig).toEqual(SIG);
+    });
+
+    it("rejects a user with no exchange-key signature", async () => {
+      await expect(insertUser("alice", KEY_A, KEY_B, null)).rejects.toThrow(/exchange_sig/);
+    });
+
+    it("rejects an exchange-key signature that is not 64 bytes", async () => {
+      await expect(insertUser("alice", KEY_A, KEY_B, Buffer.alloc(63, 3))).rejects.toThrow(/exchange_sig/);
     });
   });
 

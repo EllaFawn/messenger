@@ -38,6 +38,7 @@ async function register(who: TestIdentity): Promise<void> {
     userID: who.userId,
     identity_pubkey: crypto.toBase64(who.identity.publicKey),
     exchange_pubkey: crypto.toBase64(who.exchange.publicKey),
+    exchange_sig: crypto.toBase64(who.exchangeSig),
     inviteCode: INVITE_CODE,
   });
   expect(res.status).toBe(201);
