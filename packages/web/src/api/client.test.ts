@@ -347,18 +347,20 @@ describe("messages", () => {
   });
 
   it.each([
-    ["a reply that is not a list", { not: "a list" }],
-    ["an entry with a bad message id", [inboxEntry({ message_id: "../../x" })]],
-    ["an entry with a bad sender", [inboxEntry({ from: "someone" })]],
-    ["an entry with an unknown version", [inboxEntry({ v: 2 })]],
-    ["an entry with a nonce of the wrong length", [inboxEntry({ nonce: "AAAA" })]],
-    ["an entry with an empty ciphertext", [inboxEntry({ ciphertext: "" })]],
-    ["an entry whose ciphertext is not base64", [inboxEntry({ ciphertext: "<script>" })]],
-    ["an entry with an oversized ciphertext", [inboxEntry({ ciphertext: "A".repeat(64 * 1024 + 4) })]],
-    ["an entry with a bad date", [inboxEntry({ created_at: "yesterday" })]],
-    ["an entry that is not an object", ["text"]],
-    ["one bad entry among good ones", [inboxEntry(), inboxEntry({ from: 5 })]],
-  ])("rejects %s", async (_name, body) => {
+    ["a reply that is not a list", () => ({ not: "a list" }) as unknown],
+    ["an entry with a bad message id", () => ([inboxEntry({ message_id: "../../x" })]) as unknown],
+    ["an entry with a bad sender", () => ([inboxEntry({ from: "someone" })]) as unknown],
+    ["an entry with an unknown version", () => ([inboxEntry({ v: 2 })]) as unknown],
+    ["an entry with a nonce of the wrong length", () => ([inboxEntry({ nonce: "AAAA" })]) as unknown],
+    ["an entry with an empty ciphertext", () => ([inboxEntry({ ciphertext: "" })]) as unknown],
+    ["an entry whose ciphertext is not base64", () => ([inboxEntry({ ciphertext: "<script>" })]) as unknown],
+    ["an entry with an oversized ciphertext", () => ([inboxEntry({ ciphertext: "A".repeat(64 * 1024 + 4) })]) as unknown],
+    ["an entry with a bad date", () => ([inboxEntry({ created_at: "yesterday" })]) as unknown],
+    ["an entry that is not an object", () => (["text"]) as unknown],
+    ["one bad entry among good ones", () => ([inboxEntry(), inboxEntry({ from: 5 })]) as unknown],
+  ])("rejects %s", async (_name, makeBody) => {
+    // Built inside the test: the crypto library is not loaded yet when the table is defined.
+    const body = makeBody();
     respond = () => json(200, body);
     const error = await client.fetchInbox(identity).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("invalid_response");
