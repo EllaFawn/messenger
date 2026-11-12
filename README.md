@@ -70,6 +70,9 @@ Routes so far:
 | `GET /health` | none | Liveness check |
 | `POST /register` | signed by the key being registered + invite code | Create an account |
 | `GET /users/:userID/pubkeys` | signed | Fetch a user's public keys |
+| `POST /messages` | signed | Send an encrypted message; the sender is taken from the signature |
+| `GET /messages/inbox` | signed | The caller's unacknowledged messages, oldest first, up to 100 |
+| `POST /messages/:id/ack` | signed, recipient only | Confirm receipt; the server deletes the message |
 
 Signed requests carry `X-User-ID`, `X-Timestamp`, `X-Nonce` and
 `X-Signature`; see design section 4.
