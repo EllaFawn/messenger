@@ -139,7 +139,7 @@ Authorization: inbox returns only `to_user_id = caller`; ack verifies the row's 
 
 - **Storage**: IndexedDB — identity/exchange private keys, contacts (userID + pinned pubkeys), decrypted message history, per-contact send counters and last-seen receive counters. History exists client-side only; clearing browser data destroys it. By design.
 - **Contacts**: add by pasting a userID; client fetches pubkeys from the server, verifies the identity key hashes to the userID and that `exchange_sig` verifies, and **pins them**. If the server ever returns different keys for a pinned contact, the UI shows a hard warning and blocks sending until the user explicitly accepts the new keys. (Trust on first use.)
-- **Safety number**: `SHA-256(sort(identity_pubkey_a, identity_pubkey_b).concat())` rendered as digit groups, shown per contact. Comparing it out of band closes the malicious-server MITM hole; key pinning covers every later fetch.
+- **Safety number** (revised during implementation; originally a hash of the two identity keys only, which would not change if an exchange key were swapped): each user's fingerprint is 30 digits from `SHA-256("messager/v1/safety-number\n" || identity_pubkey || exchange_pubkey)`; the number is the two fingerprints, sorted, as twelve groups of five digits, shown per contact. Comparing it out of band closes the malicious-server MITM hole; key pinning covers every later fetch.
 - **UI**: contact list, chat view (message list + input), add-contact flow, safety-number screen, key-change warning. Minimal styling.
 - **Hygiene**: strict CSP header from the server (no inline script, no remote origins); no `dangerouslySetInnerHTML` anywhere; message text rendered as text nodes only.
 

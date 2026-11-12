@@ -23,3 +23,4 @@ export {
   buildExchangeKeyStatement,
   EXCHANGE_KEY_SIGNATURE_BYTES,
 } from "./exchange-key-signature.js";
+export { computeSafetyNumber, keyFingerprint, type SafetyNumberKeys } from "./safety-number.js";

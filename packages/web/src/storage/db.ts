@@ -1,15 +1,19 @@
 export const DATABASE_NAME = "messager";
 export const IDENTITY_STORE = "identity";
+export const CONTACTS_STORE = "contacts";
 
 /**
  * Schema version. To change the schema, add a step to `upgrade` and raise
  * this number; never edit a step that has already shipped.
  */
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
 
 function upgrade(db: IDBDatabase, oldVersion: number): void {
   if (oldVersion < 1) {
     db.createObjectStore(IDENTITY_STORE);
+  }
+  if (oldVersion < 2) {
+    db.createObjectStore(CONTACTS_STORE, { keyPath: "userId" });
   }
 }
 

@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { verifyExchangeKey, verifyRequest } from "@messager/protocol";
+import { signExchangeKey, verifyExchangeKey, verifyRequest } from "@messager/protocol";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createIdentity, type StoredIdentity } from "../identity.js";
 import { ApiError, createApiClient, type ApiClient } from "./client.js";
@@ -205,5 +205,85 @@ describe("register", () => {
     respond = () => json(403, { error: "invalid_invite" });
     const error = await client.register(identity, "wrong").catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("invalid_invite");
+  });
+});
+
+describe("getPubkeys", () => {
+  function reply(of: StoredIdentity, overrides: Record<string, unknown> = {}): Response {
+    return json(200, {
+      userID: of.userId,
+      identity_pubkey: crypto.toBase64(of.identityPublicKey),
+      exchange_pubkey: crypto.toBase64(of.exchangePublicKey),
+      exchange_sig: crypto.toBase64(signExchangeKey(of.exchangePublicKey, of.identityPrivateKey)),
+      ...overrides,
+    });
+  }
+
+  it("returns the keys as bytes and signs the request", async () => {
+    const bob = createIdentity(NOW);
+    respond = () => reply(bob);
+    const keys = await client.getPubkeys(identity, bob.userId);
+    expect(keys.userId).toBe(bob.userId);
+    expect(crypto.toHex(keys.identityPublicKey)).toBe(crypto.toHex(bob.identityPublicKey));
+    expect(crypto.toHex(keys.exchangePublicKey)).toBe(crypto.toHex(bob.exchangePublicKey));
+    expect(seen[0]!.url).toBe(`/api/users/${bob.userId}/pubkeys`);
+    expect(signatureIsValid(seen[0]!, `/users/${bob.userId}/pubkeys`)).toBe(true);
+  });
+
+  it("rejects an identity key that does not hash to the requested userID", async () => {
+    const bob = createIdentity(NOW);
+    const mallory = createIdentity(NOW);
+    respond = () => reply(bob, { identity_pubkey: crypto.toBase64(mallory.identityPublicKey) });
+    const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("rejects an exchange key swapped in by the server", async () => {
+    // The identity key and signature are genuine, but the exchange key is the attacker's.
+    const bob = createIdentity(NOW);
+    const mallory = createIdentity(NOW);
+    respond = () => reply(bob, { exchange_pubkey: crypto.toBase64(mallory.exchangePublicKey) });
+    const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("rejects an exchange key signed by a different identity", async () => {
+    const bob = createIdentity(NOW);
+    const mallory = createIdentity(NOW);
+    respond = () =>
+      reply(bob, {
+        exchange_pubkey: crypto.toBase64(mallory.exchangePublicKey),
+        exchange_sig: crypto.toBase64(signExchangeKey(mallory.exchangePublicKey, mallory.identityPrivateKey)),
+      });
+    const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("rejects a reply about a different user", async () => {
+    const bob = createIdentity(NOW);
+    respond = () => reply(createIdentity(NOW));
+    const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it.each([
+    ["a missing exchange key", { exchange_pubkey: undefined }],
+    ["a missing signature", { exchange_sig: undefined }],
+    ["a signature of the wrong length", { exchange_sig: "AAAA" }],
+    ["an exchange key of the wrong length", { exchange_pubkey: "AAAA" }],
+    ["an exchange key that is not text", { exchange_pubkey: 5 }],
+    ["an identity key that is not base64", { identity_pubkey: "!".repeat(44) }],
+  ])("rejects %s", async (_name, overrides) => {
+    const bob = createIdentity(NOW);
+    respond = () => reply(bob, overrides);
+    const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("passes on 'not found'", async () => {
+    respond = () => json(404, { error: "not_found" });
+    const error = await client.getPubkeys(identity, createIdentity(NOW).userId).catch((e: unknown) => e);
+    expect((error as ApiError).status).toBe(404);
+    expect((error as ApiError).code).toBe("not_found");
   });
 });
