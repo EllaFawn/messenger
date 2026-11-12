@@ -58,14 +58,11 @@ export function parseSignedHeaders(req: Request): SignedHeaders | null {
 }
 
 /**
- * Checks a request against a known identity public key, in this order:
- *   1. timestamp within the window
- *   2. Ed25519 signature over the canonical string (method, path + query, body hash, timestamp, nonce)
- *   3. nonce not seen before
- * The nonce is stored only after the signature verifies, so a caller without
- * a valid key cannot cause database writes.
+ * Stateless half of the check: timestamp within the window, then the Ed25519
+ * signature over the canonical string (method, path + query, body hash,
+ * timestamp, nonce). Writes nothing.
  */
-export async function verifySignedRequest(
+export async function verifySignature(
   req: Request,
   headers: SignedHeaders,
   identityPublicKey: Uint8Array,
@@ -77,9 +74,8 @@ export async function verifySignedRequest(
   }
 
   await crypto.ready;
-  let signatureValid: boolean;
   try {
-    signatureValid = verifyRequest(
+    return verifyRequest(
       {
         method: req.method,
         path: req.originalUrl,
@@ -91,12 +87,12 @@ export async function verifySignedRequest(
       headers.signature,
     );
   } catch {
-    signatureValid = false;
-  }
-  if (!signatureValid) {
     return false;
   }
+}
 
+/** Records the request's nonce. Returns false if it was already used (a replay). */
+export function recordNonce(headers: SignedHeaders, deps: AuthDeps): Promise<boolean> {
   return consumeNonce(deps.pool, {
     nonce: headers.nonce,
     userId: headers.userId,
@@ -105,8 +101,22 @@ export async function verifySignedRequest(
   });
 }
 
-function unauthorized(res: Response): void {
-  // One response for every failure, so callers learn nothing about which check failed.
+/**
+ * Full check against a known identity public key: timestamp, signature,
+ * then nonce. The nonce is stored only after the signature verifies, so a
+ * caller without a valid key cannot cause database writes.
+ */
+export async function verifySignedRequest(
+  req: Request,
+  headers: SignedHeaders,
+  identityPublicKey: Uint8Array,
+  deps: AuthDeps,
+): Promise<boolean> {
+  return (await verifySignature(req, headers, identityPublicKey, deps)) && (await recordNonce(headers, deps));
+}
+
+/** The single response for every authentication failure, so callers learn nothing about which check failed. */
+export function unauthorized(res: Response): void {
   res.status(401).json({ error: "unauthorized" });
 }
 

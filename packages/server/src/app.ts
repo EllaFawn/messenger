@@ -1,6 +1,7 @@
 import express, { type ErrorRequestHandler, type Express } from "express";
 import type { Pool } from "./db/pool.js";
 import { getRawBody, rememberRawBody } from "./raw-body.js";
+import { registerRouter } from "./routes/register.js";
 import { usersRouter } from "./routes/users.js";
 
 export { getRawBody };
@@ -62,6 +63,7 @@ export function installFallbackHandlers(app: Express): void {
 
 export function createApp(deps: AppDeps): Express {
   const app = createBaseApp();
+  app.use(registerRouter(deps));
   app.use(usersRouter(deps));
   installFallbackHandlers(app);
   return app;
