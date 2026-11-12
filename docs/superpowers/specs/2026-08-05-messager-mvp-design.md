@@ -27,6 +27,7 @@ Dependency direction: `web → {crypto, protocol}`, `server → {crypto, protoco
 
 - Identity key: Ed25519 (`crypto_sign_keypair`) — signs API requests. Not used per message.
 - Exchange key: X25519 (`crypto_box_keypair`) — ECDH.
+- **Exchange-key signature** (added during implementation): `exchange_sig = Ed25519_sign(identity_priv, "messager/v1/exchange-key\n" || exchange_pubkey)`. The original design tied only the identity key to the userID, so a malicious server could hand out its own exchange key — the key that actually encrypts messages — on first lookup. With the signature, a client holding the right userID verifies the identity key (by hash) and then the exchange key (by signature); the server cannot substitute either. The prefix keeps this signature distinct from request signatures.
 - `userID = base64url(SHA-256(identity_pubkey))` — lookup pointer, not a credential.
 - Private keys live client-side in IndexedDB, never leave the browser.
 
@@ -83,7 +84,7 @@ The nonce is stored only after the signature verifies (revised during implementa
 
 **Registration bootstrap** (`POST /register`, no key on file yet):
 
-1. Verify `userID == base64url(SHA-256(identity_pubkey))` from the body — proof the ID binds to the key.
+1. Verify `userID == base64url(SHA-256(identity_pubkey))` from the body — proof the ID binds to the key — and that `exchange_sig` verifies under that identity key (400 otherwise).
 2. Verify the request signature against the pubkey **in the body** — proof of possession.
 3. Verify invite code (M1: single static code in server env; M2: per-invite codes). Compared in constant time.
 4. Only then store the nonce and insert the user.
@@ -97,6 +98,7 @@ users (
   user_id          text PRIMARY KEY,
   identity_pubkey  bytea NOT NULL,
   exchange_pubkey  bytea NOT NULL,
+  exchange_sig     bytea NOT NULL,  -- identity key's signature over exchange_pubkey
   created_at       timestamptz NOT NULL DEFAULT now()
 );
 
@@ -123,7 +125,7 @@ auth_nonces (
 ## 6. API
 
 ```
-POST /register                  { userID, identity_pubkey, exchange_pubkey, inviteCode }
+POST /register                  { userID, identity_pubkey, exchange_pubkey, exchange_sig, inviteCode }
 GET  /users/:userID/pubkeys                                   (signed)
 POST /messages                  { v, to, nonce, ciphertext }  (signed)
 GET  /messages/inbox                                          (signed)
@@ -136,7 +138,7 @@ Authorization: inbox returns only `to_user_id = caller`; ack verifies the row's 
 ## 7. Client
 
 - **Storage**: IndexedDB — identity/exchange private keys, contacts (userID + pinned pubkeys), decrypted message history, per-contact send counters and last-seen receive counters. History exists client-side only; clearing browser data destroys it. By design.
-- **Contacts**: add by pasting a userID; client fetches pubkeys from the server and **pins them**. If the server ever returns different keys for a pinned contact, the UI shows a hard warning and blocks sending until the user explicitly accepts the new keys. (Trust on first use.)
+- **Contacts**: add by pasting a userID; client fetches pubkeys from the server, verifies the identity key hashes to the userID and that `exchange_sig` verifies, and **pins them**. If the server ever returns different keys for a pinned contact, the UI shows a hard warning and blocks sending until the user explicitly accepts the new keys. (Trust on first use.)
 - **Safety number**: `SHA-256(sort(identity_pubkey_a, identity_pubkey_b).concat())` rendered as digit groups, shown per contact. Comparing it out of band closes the malicious-server MITM hole; key pinning covers every later fetch.
 - **UI**: contact list, chat view (message list + input), add-contact flow, safety-number screen, key-change warning. Minimal styling.
 - **Hygiene**: strict CSP header from the server (no inline script, no remote origins); no `dangerouslySetInnerHTML` anywhere; message text rendered as text nodes only.
