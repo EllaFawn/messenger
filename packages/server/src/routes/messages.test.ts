@@ -365,3 +365,117 @@ describe("GET /messages/inbox", () => {
     expect(res.status).toBe(401);
   });
 });
+
+function ack(who: TestIdentity, messageId: string): Promise<Response> {
+  return signedFetch(server.url, who, `/messages/${messageId}/ack`, { method: "POST", timestamp: NOW });
+}
+
+async function messageExists(messageId: string): Promise<boolean> {
+  const result = await db.pool.query("SELECT 1 FROM messages WHERE message_id = $1", [messageId]);
+  return result.rowCount === 1;
+}
+
+describe("POST /messages/:id/ack", () => {
+  it("deletes the message when the recipient acknowledges it", async () => {
+    const id = await insertMessage(alice, bob, 1);
+    const res = await ack(bob, id);
+    expect(res.status).toBe(204);
+    expect(await res.text()).toBe("");
+    expect(await messageExists(id)).toBe(false);
+    expect(await inbox(bob)).toEqual([]);
+  });
+
+  it("removes only the acknowledged message", async () => {
+    const first = await insertMessage(alice, bob, 2);
+    const second = await insertMessage(alice, bob, 1);
+    expect((await ack(bob, first)).status).toBe(204);
+    expect((await inbox(bob)).map((m) => m.message_id)).toEqual([second]);
+  });
+
+  it("does not let the sender acknowledge (and so delete) their own message", async () => {
+    const id = await insertMessage(alice, bob, 1);
+    const res = await ack(alice, id);
+    expect(res.status).toBe(404);
+    expect(await messageExists(id)).toBe(true);
+  });
+
+  it("does not let a third user acknowledge someone else's message", async () => {
+    const carol = makeIdentity();
+    await insertUser(db.pool, carol);
+    const id = await insertMessage(alice, bob, 1);
+    const res = await ack(carol, id);
+    expect(res.status).toBe(404);
+    expect(await messageExists(id)).toBe(true);
+  });
+
+  it("answers the same way for someone else's message as for one that does not exist", async () => {
+    const id = await insertMessage(alice, bob, 1);
+    const notMine = await ack(alice, id);
+    const missing = await ack(alice, "00000000-0000-4000-8000-000000000000");
+    expect(notMine.status).toBe(404);
+    expect(missing.status).toBe(404);
+    expect(await notMine.text()).toBe(await missing.text());
+  });
+
+  it("returns 404 when the message was already acknowledged", async () => {
+    const id = await insertMessage(alice, bob, 1);
+    expect((await ack(bob, id)).status).toBe(204);
+    const again = await ack(bob, id);
+    expect(again.status).toBe(404);
+    expect(await again.json()).toEqual({ error: "not_found" });
+  });
+
+  it.each([["not-a-uuid"], ["123"], ["00000000-0000-4000-8000-00000000000g"], ["1'%20OR%20'1'='1"]])(
+    "returns 404 for the malformed id %s",
+    async (badId) => {
+      const id = await insertMessage(alice, bob, 1);
+      const res = await ack(bob, badId);
+      expect(res.status).toBe(404);
+      expect(await res.json()).toEqual({ error: "not_found" });
+      expect(await messageExists(id)).toBe(true);
+    },
+  );
+
+  it("rejects an unsigned request and keeps the message", async () => {
+    const id = await insertMessage(alice, bob, 1);
+    const res = await fetch(`${server.url}/messages/${id}/ack`, { method: "POST" });
+    expect(res.status).toBe(401);
+    expect(await messageExists(id)).toBe(true);
+  });
+
+  it("rejects a signature made for a different message id", async () => {
+    const mine = await insertMessage(alice, bob, 2);
+    const other = await insertMessage(alice, bob, 1);
+    const res = await signedFetch(server.url, bob, `/messages/${other}/ack`, {
+      method: "POST",
+      timestamp: NOW,
+      signAs: { path: `/messages/${mine}/ack` },
+    });
+    expect(res.status).toBe(401);
+    expect(await messageExists(mine)).toBe(true);
+    expect(await messageExists(other)).toBe(true);
+  });
+
+  it("does not acknowledge on GET", async () => {
+    const id = await insertMessage(alice, bob, 1);
+    const res = await signedFetch(server.url, bob, `/messages/${id}/ack`, { timestamp: NOW });
+    expect(res.status).toBe(404);
+    expect(await messageExists(id)).toBe(true);
+  });
+
+  it("brings the next messages into view once a full page is acknowledged", async () => {
+    await db.pool.query(
+      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
+       SELECT $1, $2, $3, $4, now() - make_interval(secs => n)
+       FROM generate_series(1, $5::int) AS n`,
+      [alice.userId, bob.userId, Buffer.alloc(24), Buffer.alloc(16), INBOX_PAGE_SIZE + 2],
+    );
+    const firstPage = await inbox(bob);
+    for (const item of firstPage) {
+      expect((await ack(bob, item.message_id)).status).toBe(204);
+    }
+    const rest = await inbox(bob);
+    expect(rest).toHaveLength(2);
+    expect(firstPage.map((m) => m.message_id)).not.toContain(rest[0]!.message_id);
+  });
+});

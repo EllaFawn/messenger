@@ -12,6 +12,8 @@ const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/
 /** A ciphertext always carries a 16-byte Poly1305 tag, so nothing shorter can be genuine. */
 const MIN_CIPHERTEXT_BYTES = 16;
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Most messages returned by one inbox fetch. Acknowledging them brings the next ones into view. */
 export const INBOX_PAGE_SIZE = 100;
 
@@ -122,6 +124,28 @@ export function messagesRouter(deps: AuthDeps): Router {
         created_at: row.created_at.toISOString(),
       })),
     );
+  });
+
+  // Acknowledging deletes the row, so the server stops holding the ciphertext.
+  // Only the recipient may do it. Someone else's message and a missing one get
+  // the same 404, so the answer does not reveal whether an id exists.
+  router.post("/messages/:id/ack", requireSignedRequest(deps), async (req, res) => {
+    const messageId = req.params.id;
+    if (typeof messageId !== "string" || !UUID_PATTERN.test(messageId)) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+
+    const deleted = await deps.pool.query(
+      "DELETE FROM messages WHERE message_id = $1 AND to_user_id = $2",
+      [messageId, authenticatedUserId(res)],
+    );
+    if (deleted.rowCount !== 1) {
+      res.status(404).json({ error: "not_found" });
+      return;
+    }
+
+    res.status(204).end();
   });
 
   return router;
