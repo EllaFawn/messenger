@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { signExchangeKey, signRequest } from "@messager/protocol";
+import { deriveUserId, signExchangeKey, signRequest, verifyExchangeKey } from "@messager/protocol";
 import type { StoredIdentity } from "../identity.js";
 
 /** The browser reaches the server through this same-origin prefix; see vite.config.ts. */
@@ -27,6 +27,18 @@ export interface ApiClientOptions {
   now?: () => number;
 }
 
+/** Another user's public keys, as returned (and checked) by getPubkeys. */
+export interface PublicKeys {
+  userId: string;
+  identityPublicKey: Uint8Array;
+  exchangePublicKey: Uint8Array;
+}
+
+/** Standard base64 of exactly 32 bytes. */
+const KEY_PATTERN = /^[A-Za-z0-9+/]{43}=$/;
+/** Standard base64 of exactly 64 bytes (an Ed25519 signature). */
+const SIGNATURE_PATTERN = /^[A-Za-z0-9+/]{86}==$/;
+
 export interface ApiClient {
   /**
    * Sends a request signed with the identity key and returns the parsed JSON
@@ -36,6 +48,13 @@ export interface ApiClient {
   request(identity: StoredIdentity, method: string, path: string, body?: unknown): Promise<unknown>;
   /** Registers the identity's public keys with the server. */
   register(identity: StoredIdentity, inviteCode: string): Promise<void>;
+  /**
+   * Fetches a user's public keys. Rejects the reply unless the identity key
+   * hashes to the userID that was asked for and has signed the exchange key,
+   * so the server cannot substitute either key. Throws ApiError "not_found"
+   * if no such user.
+   */
+  getPubkeys(identity: StoredIdentity, userId: string): Promise<PublicKeys>;
 }
 
 function errorCodeFrom(text: string): string {
@@ -132,5 +151,31 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     }
   }
 
-  return { request, register };
+  async function getPubkeys(identity: StoredIdentity, userId: string): Promise<PublicKeys> {
+    const result = await request(identity, "GET", `/users/${encodeURIComponent(userId)}/pubkeys`);
+    const reply = typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
+    const { userID, identity_pubkey, exchange_pubkey, exchange_sig } = reply;
+    if (
+      userID !== userId ||
+      typeof identity_pubkey !== "string" ||
+      typeof exchange_pubkey !== "string" ||
+      typeof exchange_sig !== "string" ||
+      !KEY_PATTERN.test(identity_pubkey) ||
+      !KEY_PATTERN.test(exchange_pubkey) ||
+      !SIGNATURE_PATTERN.test(exchange_sig)
+    ) {
+      throw new ApiError(200, "invalid_response");
+    }
+    const identityPublicKey = crypto.fromBase64(identity_pubkey);
+    const exchangePublicKey = crypto.fromBase64(exchange_pubkey);
+    if (
+      deriveUserId(identityPublicKey) !== userId ||
+      !verifyExchangeKey(exchangePublicKey, crypto.fromBase64(exchange_sig), identityPublicKey)
+    ) {
+      throw new ApiError(200, "invalid_response");
+    }
+    return { userId, identityPublicKey, exchangePublicKey };
+  }
+
+  return { request, register, getPubkeys };
 }

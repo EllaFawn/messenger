@@ -24,6 +24,9 @@ beforeEach(async () => {
   registerResult = () => undefined;
   client = {
     request: async () => undefined,
+    getPubkeys: async () => {
+      throw new Error("not used");
+    },
     register: async (identity, inviteCode) => {
       registerCalls.push({ identity, inviteCode });
       registerResult();
