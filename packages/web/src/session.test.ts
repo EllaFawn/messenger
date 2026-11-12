@@ -24,6 +24,11 @@ beforeEach(async () => {
   registerResult = () => undefined;
   client = {
     request: async () => undefined,
+    sendMessage: async () => {
+      throw new Error("not used");
+    },
+    fetchInbox: async () => [],
+    ackMessage: async () => undefined,
     getPubkeys: async () => {
       throw new Error("not used");
     },

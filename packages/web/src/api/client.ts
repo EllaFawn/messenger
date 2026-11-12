@@ -1,5 +1,11 @@
 import * as crypto from "@messager/crypto";
-import { deriveUserId, signExchangeKey, signRequest, verifyExchangeKey } from "@messager/protocol";
+import {
+  deriveUserId,
+  signExchangeKey,
+  signRequest,
+  verifyExchangeKey,
+  type Envelope,
+} from "@messager/protocol";
 import type { StoredIdentity } from "../identity.js";
 
 /** The browser reaches the server through this same-origin prefix; see vite.config.ts. */
@@ -34,6 +40,51 @@ export interface PublicKeys {
   exchangePublicKey: Uint8Array;
 }
 
+/** A message waiting on the server. Still encrypted; `from` is the server's claim until decryption proves it. */
+export interface InboxItem {
+  messageId: string;
+  from: string;
+  /** Standard base64, as in the wire envelope. */
+  nonce: string;
+  ciphertext: string;
+  /** ISO time the server stored it. */
+  createdAt: string;
+}
+
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const USER_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+/** Standard base64 of exactly 24 bytes. */
+const MESSAGE_NONCE_PATTERN = /^[A-Za-z0-9+/]{32}$/;
+const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+/** Guards against a server sending an absurdly large inbox entry. */
+const MAX_CIPHERTEXT_CHARS = 64 * 1024;
+const MAX_INBOX_ITEMS = 1000;
+
+function parseInboxItem(value: unknown): InboxItem | null {
+  if (typeof value !== "object" || value === null) {
+    return null;
+  }
+  const { message_id, from, v, nonce, ciphertext, created_at } = value as Record<string, unknown>;
+  if (
+    v !== 1 ||
+    typeof message_id !== "string" ||
+    typeof from !== "string" ||
+    typeof nonce !== "string" ||
+    typeof ciphertext !== "string" ||
+    typeof created_at !== "string" ||
+    !UUID_PATTERN.test(message_id) ||
+    !USER_ID_PATTERN.test(from) ||
+    !MESSAGE_NONCE_PATTERN.test(nonce) ||
+    ciphertext.length === 0 ||
+    ciphertext.length > MAX_CIPHERTEXT_CHARS ||
+    !BASE64_PATTERN.test(ciphertext) ||
+    Number.isNaN(Date.parse(created_at))
+  ) {
+    return null;
+  }
+  return { messageId: message_id, from, nonce, ciphertext, createdAt: created_at };
+}
+
 /** Standard base64 of exactly 32 bytes. */
 const KEY_PATTERN = /^[A-Za-z0-9+/]{43}=$/;
 /** Standard base64 of exactly 64 bytes (an Ed25519 signature). */
@@ -55,6 +106,12 @@ export interface ApiClient {
    * if no such user.
    */
   getPubkeys(identity: StoredIdentity, userId: string): Promise<PublicKeys>;
+  /** Hands an already-encrypted envelope to the server for delivery. */
+  sendMessage(identity: StoredIdentity, envelope: Envelope): Promise<{ messageId: string }>;
+  /** Messages waiting for this user, oldest first. They stay on the server until acknowledged. */
+  fetchInbox(identity: StoredIdentity): Promise<InboxItem[]>;
+  /** Tells the server a message is safely stored here, so it can delete its copy. */
+  ackMessage(identity: StoredIdentity, messageId: string): Promise<void>;
 }
 
 function errorCodeFrom(text: string): string {
@@ -177,5 +234,39 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     return { userId, identityPublicKey, exchangePublicKey };
   }
 
-  return { request, register, getPubkeys };
+  async function sendMessage(identity: StoredIdentity, envelope: Envelope): Promise<{ messageId: string }> {
+    const result = await request(identity, "POST", "/messages", envelope);
+    const messageId =
+      typeof result === "object" && result !== null ? (result as Record<string, unknown>).message_id : undefined;
+    if (typeof messageId !== "string" || !UUID_PATTERN.test(messageId)) {
+      throw new ApiError(201, "invalid_response");
+    }
+    return { messageId };
+  }
+
+  async function fetchInbox(identity: StoredIdentity): Promise<InboxItem[]> {
+    const result = await request(identity, "GET", "/messages/inbox");
+    if (!Array.isArray(result) || result.length > MAX_INBOX_ITEMS) {
+      throw new ApiError(200, "invalid_response");
+    }
+    // One malformed entry is refused as a whole reply: never guess at what the server meant.
+    const items: InboxItem[] = [];
+    for (const entry of result) {
+      const item = parseInboxItem(entry);
+      if (item === null) {
+        throw new ApiError(200, "invalid_response");
+      }
+      items.push(item);
+    }
+    return items;
+  }
+
+  async function ackMessage(identity: StoredIdentity, messageId: string): Promise<void> {
+    if (!UUID_PATTERN.test(messageId)) {
+      throw new ApiError(0, "invalid_request");
+    }
+    await request(identity, "POST", `/messages/${messageId}/ack`);
+  }
+
+  return { request, register, getPubkeys, sendMessage, fetchInbox, ackMessage };
 }

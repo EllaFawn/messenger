@@ -287,3 +287,101 @@ describe("getPubkeys", () => {
     expect((error as ApiError).code).toBe("not_found");
   });
 });
+
+describe("messages", () => {
+  const MESSAGE_ID = "3f2b8c1e-5d4a-4b6f-9e7a-0c1d2e3f4a5b";
+
+  function inboxEntry(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      message_id: MESSAGE_ID,
+      from: createIdentity(NOW).userId,
+      v: 1,
+      nonce: crypto.toBase64(crypto.randomBytes(24)),
+      ciphertext: crypto.toBase64(crypto.randomBytes(40)),
+      created_at: "2027-01-15T08:00:00.000Z",
+      ...overrides,
+    };
+  }
+
+  it("sends the envelope unchanged and returns the server's message id", async () => {
+    const envelope = {
+      v: 1 as const,
+      to: createIdentity(NOW).userId,
+      nonce: crypto.toBase64(crypto.randomBytes(24)),
+      ciphertext: crypto.toBase64(crypto.randomBytes(40)),
+    };
+    respond = () => json(201, { message_id: MESSAGE_ID, created_at: "2027-01-15T08:00:00.000Z" });
+    expect(await client.sendMessage(identity, envelope)).toEqual({ messageId: MESSAGE_ID });
+    expect(seen[0]!.method).toBe("POST");
+    expect(seen[0]!.url).toBe("/api/messages");
+    expect(JSON.parse(seen[0]!.body!)).toEqual(envelope);
+    expect(signatureIsValid(seen[0]!, "/messages")).toBe(true);
+  });
+
+  it("rejects a send reply without a proper message id", async () => {
+    respond = () => json(201, { message_id: "nope" });
+    const envelope = { v: 1 as const, to: "x", nonce: "y", ciphertext: "z" };
+    const error = await client.sendMessage(identity, envelope).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("fetches the inbox and converts each entry", async () => {
+    const entry = inboxEntry();
+    respond = () => json(200, [entry]);
+    expect(await client.fetchInbox(identity)).toEqual([
+      {
+        messageId: MESSAGE_ID,
+        from: entry.from,
+        nonce: entry.nonce,
+        ciphertext: entry.ciphertext,
+        createdAt: entry.created_at,
+      },
+    ]);
+    expect(seen[0]!.url).toBe("/api/messages/inbox");
+    expect(signatureIsValid(seen[0]!, "/messages/inbox")).toBe(true);
+  });
+
+  it("returns an empty list for an empty inbox", async () => {
+    respond = () => json(200, []);
+    expect(await client.fetchInbox(identity)).toEqual([]);
+  });
+
+  it.each([
+    ["a reply that is not a list", { not: "a list" }],
+    ["an entry with a bad message id", [inboxEntry({ message_id: "../../x" })]],
+    ["an entry with a bad sender", [inboxEntry({ from: "someone" })]],
+    ["an entry with an unknown version", [inboxEntry({ v: 2 })]],
+    ["an entry with a nonce of the wrong length", [inboxEntry({ nonce: "AAAA" })]],
+    ["an entry with an empty ciphertext", [inboxEntry({ ciphertext: "" })]],
+    ["an entry whose ciphertext is not base64", [inboxEntry({ ciphertext: "<script>" })]],
+    ["an entry with an oversized ciphertext", [inboxEntry({ ciphertext: "A".repeat(64 * 1024 + 4) })]],
+    ["an entry with a bad date", [inboxEntry({ created_at: "yesterday" })]],
+    ["an entry that is not an object", ["text"]],
+    ["one bad entry among good ones", [inboxEntry(), inboxEntry({ from: 5 })]],
+  ])("rejects %s", async (_name, body) => {
+    respond = () => json(200, body);
+    const error = await client.fetchInbox(identity).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("acknowledges a message", async () => {
+    respond = () => new Response(null, { status: 204 });
+    await client.ackMessage(identity, MESSAGE_ID);
+    expect(seen[0]!.method).toBe("POST");
+    expect(seen[0]!.url).toBe(`/api/messages/${MESSAGE_ID}/ack`);
+    expect(seen[0]!.body).toBeUndefined();
+    expect(signatureIsValid(seen[0]!, `/messages/${MESSAGE_ID}/ack`)).toBe(true);
+  });
+
+  it("refuses to build an ack path from anything but a message id", async () => {
+    const error = await client.ackMessage(identity, "../register").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_request");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("passes on 'not found' when acknowledging", async () => {
+    respond = () => json(404, { error: "not_found" });
+    const error = await client.ackMessage(identity, MESSAGE_ID).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("not_found");
+  });
+});

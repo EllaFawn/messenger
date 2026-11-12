@@ -42,6 +42,11 @@ beforeEach(async () => {
   lookups = [];
   client = {
     request: async () => undefined,
+    sendMessage: async () => {
+      throw new Error("not used");
+    },
+    fetchInbox: async () => [],
+    ackMessage: async () => undefined,
     register: async () => undefined,
     getPubkeys: async (_identity, userId) => {
       lookups.push(userId);
