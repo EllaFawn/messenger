@@ -5,14 +5,17 @@
   "type": "module",
   "main": "./dist/index.js",
   "scripts": {
-    "migrate": "tsc -b && node dist/db/migrate-cli.js"
+    "migrate": "tsc -b && node --env-file-if-exists=../../.env dist/db/migrate-cli.js",
+    "start": "tsc -b && node --env-file-if-exists=../../.env dist/index.js"
   },
   "dependencies": {
     "@messager/crypto": "*",
     "@messager/protocol": "*",
+    "express": "^5.3.0",
     "pg": "^8.23.1"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^26.6.6",
     "@types/pg": "^8.23.1"
   }

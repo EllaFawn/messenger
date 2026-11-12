@@ -31,6 +31,10 @@ npm test
 npm run typecheck
 ```
 
+Workspace packages export their compiled `dist/` output (built by
+`npm run typecheck`); tests resolve them to source, so no build is needed to
+run tests.
+
 `npm test` needs Postgres running: the server tests create a throwaway
 database for each test file and drop it afterwards, so the dev database is
 never touched.
@@ -47,3 +51,25 @@ Schema changes live in `packages/server/migrations` as numbered `.sql` files
 To change the schema, add a new numbered file. Never edit a file that has
 already been applied: the runner records a checksum for each one and refuses
 to run if it has changed.
+
+## Running the server
+
+```
+cp .env.example .env                    # then set INVITE_CODE (openssl rand -base64 24)
+npm run migrate -w @messager/server
+npm run start -w @messager/server       # http://127.0.0.1:3000
+```
+
+The server refuses to start without an `INVITE_CODE` of at least 20
+characters. `.env` is git-ignored; never commit it.
+
+Routes so far:
+
+| Route | Auth | Purpose |
+|---|---|---|
+| `GET /health` | none | Liveness check |
+| `POST /register` | signed by the key being registered + invite code | Create an account |
+| `GET /users/:userID/pubkeys` | signed | Fetch a user's public keys |
+
+Signed requests carry `X-User-ID`, `X-Timestamp`, `X-Nonce` and
+`X-Signature`; see design section 4.

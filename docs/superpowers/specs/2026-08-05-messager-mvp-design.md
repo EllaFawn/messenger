@@ -76,14 +76,19 @@ v1\n{METHOD}\n{path}\n{hex(SHA-256(raw_body))}\n{timestamp}\n{nonce}
 Server verification order:
 
 1. `|now − timestamp| ≤ 60s`, else 401.
-2. Nonce unseen: insert into `auth_nonces` (PK constraint rejects replays); rows swept after expiry.
-3. Signature verifies against the registered `identity_pubkey` for `X-User-ID`, else 401.
+2. Signature verifies against the registered `identity_pubkey` for `X-User-ID`, else 401.
+3. Nonce unseen: insert into `auth_nonces` (PK constraint rejects replays); rows swept after expiry.
+
+The nonce is stored only after the signature verifies (revised during implementation; originally nonce-then-signature). Otherwise a caller with no valid key could fill `auth_nonces` with junk rows. Replay protection is unchanged: a replayed request has a valid signature and is rejected at step 3. Every failure returns the same 401 body.
 
 **Registration bootstrap** (`POST /register`, no key on file yet):
 
 1. Verify `userID == base64url(SHA-256(identity_pubkey))` from the body — proof the ID binds to the key.
 2. Verify the request signature against the pubkey **in the body** — proof of possession.
-3. Verify invite code (M1: single static code in server env; M2: per-invite codes).
+3. Verify invite code (M1: single static code in server env; M2: per-invite codes). Compared in constant time.
+4. Only then store the nonce and insert the user.
+
+Nothing is written before the invite code passes: anyone can generate a key and sign with it, so on this route the invite code is the only scarce credential. An existing `user_id` is never overwritten (409), so registered keys cannot be replaced.
 
 ## 5. Data model
 
@@ -140,7 +145,7 @@ Authorization: inbox returns only `to_user_id = caller`; ack verifies the row's 
 
 - `crypto`: published test vectors, not just round-trips — RFC 7748 (X25519), RFC 5869 (HKDF-SHA256), RFC 8032 (Ed25519, for request signing), libsodium XChaCha20-Poly1305-ietf vectors. Negative tests: flipped ciphertext bit fails, wrong AD fails, wrong recipient key fails, A→B key ≠ B→A key.
 - `protocol`: canonical-string golden tests (same bytes from client and server builders), envelope encode/decode round-trip, userID derivation vectors.
-- `server`: supertest against dockerized Postgres — register happy path; bad invite code; replayed nonce rejected; stale timestamp rejected; forged signature rejected; A cannot read B's inbox; A cannot ack B's message; ack deletes.
+- `server`: real HTTP requests (Node's built-in `fetch` against the app on a random local port; no `supertest`, to keep the dependency tree small) against dockerized Postgres — register happy path; bad invite code; replayed nonce rejected; stale timestamp rejected; forged signature rejected; A cannot read B's inbox; A cannot ack B's message; ack deletes.
 - End-to-end: two headless clients register, exchange userIDs, send/receive/ack through a real server; counters reject a replayed envelope.
 
 ## 9. Threat model (M1, honest version)

@@ -34,6 +34,15 @@ export async function createTestDatabase(): Promise<TestDatabase> {
     pool,
     async drop() {
       await pool.end();
+      // pool.end() can resolve before the server has finished closing every
+      // connection. Wait for them to go so the drop does not cut one off mid-close.
+      for (let attempt = 0; attempt < 200; attempt++) {
+        const open = await admin.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname = $1", [
+          name,
+        ]);
+        if (open.rows[0].n === 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
       await admin.query(`DROP DATABASE IF EXISTS ${name} WITH (FORCE)`);
       await admin.end();
     },

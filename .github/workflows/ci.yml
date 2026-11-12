@@ -51,3 +51,13 @@ jobs:
       - run: npm run typecheck
 
       - run: npm test
+
+      # Tests run against TypeScript source; this checks the compiled server
+      # (built by the typecheck step) actually starts under plain Node.
+      - name: Smoke test compiled server
+        env:
+          INVITE_CODE: ci-smoke-test-invite-code-not-secret
+          PORT: 3999
+        run: |
+          node packages/server/dist/index.js &
+          curl --fail --silent --show-error --retry 20 --retry-connrefused --retry-delay 1 http://127.0.0.1:3999/health
