@@ -1,5 +1,9 @@
-import express, { type ErrorRequestHandler, type Express, type Request } from "express";
+import express, { type ErrorRequestHandler, type Express } from "express";
 import type { Pool } from "./db/pool.js";
+import { getRawBody, rememberRawBody } from "./raw-body.js";
+import { usersRouter } from "./routes/users.js";
+
+export { getRawBody };
 
 /** Requests are small JSON envelopes; anything larger is rejected before parsing. */
 export const MAX_BODY_BYTES = 16 * 1024;
@@ -12,17 +16,6 @@ export interface AppDeps {
   now?: () => number;
 }
 
-const EMPTY = Buffer.alloc(0);
-const rawBodies = new WeakMap<object, Buffer>();
-
-/**
- * The exact bytes of the request body as received. Request signatures cover
- * a hash of these bytes, so they must not be re-serialized from parsed JSON.
- */
-export function getRawBody(req: Request): Buffer {
-  return rawBodies.get(req) ?? EMPTY;
-}
-
 /** Body parsing and routes that need no dependencies. Add routes, then call installFallbackHandlers. */
 export function createBaseApp(): Express {
   const app = express();
@@ -32,7 +25,7 @@ export function createBaseApp(): Express {
       limit: MAX_BODY_BYTES,
       strict: true,
       verify: (req, _res, buf) => {
-        rawBodies.set(req, buf);
+        rememberRawBody(req, buf);
       },
     }),
   );
@@ -67,8 +60,9 @@ export function installFallbackHandlers(app: Express): void {
   app.use(onError);
 }
 
-export function createApp(_deps: AppDeps): Express {
+export function createApp(deps: AppDeps): Express {
   const app = createBaseApp();
+  app.use(usersRouter(deps));
   installFallbackHandlers(app);
   return app;
 }
