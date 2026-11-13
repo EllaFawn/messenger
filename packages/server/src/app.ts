@@ -16,6 +16,8 @@ export interface AppDeps {
   inviteCode: string;
   /** Clock in unix ms; injectable for tests. */
   now?: () => number;
+  /** Called with the recipient's userID after a message is stored. */
+  onMessageStored?: (toUserId: string) => void;
 }
 
 /** Body parsing and routes that need no dependencies. Add routes, then call installFallbackHandlers. */

@@ -73,6 +73,7 @@ Routes so far:
 | `POST /messages` | signed | Send an encrypted message; the sender is taken from the signature |
 | `GET /messages/inbox` | signed | The caller's unacknowledged messages, oldest first, up to 100 |
 | `POST /messages/:id/ack` | signed, recipient only | Confirm receipt; the server deletes the message |
+| `GET /ws` (WebSocket) | signed, via query parameters | Tells you at once when a message arrives; carries no content |
 
 Signed requests carry `X-User-ID`, `X-Timestamp`, `X-Nonce` and
 `X-Signature`; see design section 4.
