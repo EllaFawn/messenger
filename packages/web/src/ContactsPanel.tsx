@@ -14,7 +14,7 @@ import {
 import { Conversation } from "./Conversation.js";
 import type { StoredIdentity } from "./identity.js";
 import { connectPush } from "./push.js";
-import { describeError } from "./session.js";
+import { describeError, isRejectedByServer, registerAgain } from "./session.js";
 import { listContacts } from "./storage/contact-store.js";
 
 interface ContactsPanelProps {
@@ -33,6 +33,7 @@ export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
   const [inboxTick, setInboxTick] = useState(0);
   const [unknownSenders, setUnknownSenders] = useState<string[]>([]);
   const [inboxError, setInboxError] = useState<string | null>(null);
+  const [rejected, setRejected] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -49,10 +50,14 @@ export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
         const result = await receiveMessages({ db, client, me });
         if (cancelled) return;
         setInboxError(null);
+        setRejected(false);
         setUnknownSenders(result.unknownSenders);
         if (result.stored > 0) setInboxTick((tick) => tick + 1);
       } catch (caught) {
-        if (!cancelled) setInboxError(describeError(caught));
+        if (!cancelled) {
+          setInboxError(describeError(caught));
+          setRejected(isRejectedByServer(caught));
+        }
       } finally {
         running = false;
         if (again && !cancelled) {
@@ -119,6 +124,7 @@ export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
       />
       {error !== null && <p role="alert">{error}</p>}
       {inboxError !== null && <p role="alert">Could not check for new messages: {inboxError}</p>}
+      {rejected && <RegisterAgainForm db={db} client={client} />}
       {unknownSenders.length > 0 && (
         <div>
           <p>Messages are waiting from people who are not in your contacts. Add them to read the messages:</p>
@@ -149,6 +155,60 @@ export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
         </ul>
       )}
     </section>
+  );
+}
+
+/** Shown when the server refuses this identity's requests, e.g. after the server's database was reset. */
+function RegisterAgainForm({ db, client }: { db: IDBDatabase; client: ApiClient }) {
+  const [inviteCode, setInviteCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+
+  async function onSubmit(event: FormEvent) {
+    event.preventDefault();
+    if (busy) return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const outcome = await registerAgain({ db, client, inviteCode });
+      setInviteCode("");
+      setMessage(
+        outcome === "registered"
+          ? "Registered again. Messages will start arriving shortly."
+          : "The server already knows this identity, so the problem is probably this device's clock.",
+      );
+    } catch (caught) {
+      setMessage(describeError(caught));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      <p>
+        If the server's data was reset, it no longer knows this identity. You can register the same
+        identity again; your keys, contacts and messages in this browser are kept.
+      </p>
+      <form onSubmit={onSubmit}>
+        <label>
+          Invite code{" "}
+          <input
+            type="password"
+            name="invite-code"
+            autoComplete="off"
+            value={inviteCode}
+            onChange={(event) => setInviteCode(event.target.value)}
+            disabled={busy}
+            required
+          />
+        </label>{" "}
+        <button type="submit" disabled={busy}>
+          {busy ? "Working…" : "Register again"}
+        </button>
+      </form>
+      {message !== null && <p role="alert">{message}</p>}
+    </div>
   );
 }
 
