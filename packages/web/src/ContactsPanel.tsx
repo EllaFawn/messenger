@@ -13,6 +13,7 @@ import {
 } from "./contacts.js";
 import { Conversation } from "./Conversation.js";
 import type { StoredIdentity } from "./identity.js";
+import { connectPush } from "./push.js";
 import { describeError } from "./session.js";
 import { listContacts } from "./storage/contact-store.js";
 
@@ -22,8 +23,11 @@ interface ContactsPanelProps {
   me: StoredIdentity;
 }
 
-/** How often to check the server for new messages. Replaced by push notifications later. */
-const POLL_INTERVAL_MS = 3000;
+/**
+ * The server pushes a nudge the moment a message arrives. This slower check
+ * is only a safety net for when the push connection is down.
+ */
+const FALLBACK_POLL_INTERVAL_MS = 30_000;
 
 export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
   const [inboxTick, setInboxTick] = useState(0);
@@ -33,9 +37,13 @@ export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
   useEffect(() => {
     let cancelled = false;
     let running = false;
+    let again = false;
     async function poll() {
-      // Never overlap two checks; a slow one simply delays the next.
-      if (running) return;
+      // Never overlap two checks. A nudge that lands mid-check triggers one more afterwards.
+      if (running) {
+        again = true;
+        return;
+      }
       running = true;
       try {
         const result = await receiveMessages({ db, client, me });
@@ -47,13 +55,19 @@ export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
         if (!cancelled) setInboxError(describeError(caught));
       } finally {
         running = false;
+        if (again && !cancelled) {
+          again = false;
+          void poll();
+        }
       }
     }
     void poll();
-    const timer = setInterval(() => void poll(), POLL_INTERVAL_MS);
+    const timer = setInterval(() => void poll(), FALLBACK_POLL_INTERVAL_MS);
+    const stopPush = connectPush({ me, onNewMessage: () => void poll(), onConnected: () => void poll() });
     return () => {
       cancelled = true;
       clearInterval(timer);
+      stopPush();
     };
   }, [db, client, me]);
 

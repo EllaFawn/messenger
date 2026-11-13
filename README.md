@@ -96,8 +96,8 @@ userID. The private keys are stored only in that browser's IndexedDB;
 clearing the site's data deletes them for good.
 
 Add a contact by pasting their userID; each contact shows a safety number
-to compare out of band and a conversation. The app checks the server for
-new messages every few seconds. To try it alone, use a normal window and a
+to compare out of band and a conversation. New messages arrive at once over a
+WebSocket; a slower periodic check covers the case where that connection is down. To try it alone, use a normal window and a
 private window as two separate users.
 
 `npm run build -w @messager/web` produces the production bundle in
