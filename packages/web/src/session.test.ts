@@ -3,7 +3,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { ApiError, type ApiClient } from "./api/client.js";
 import type { StoredIdentity } from "./identity.js";
-import { describeError, loadSession, signUp } from "./session.js";
+import { describeError, isRejectedByServer, loadSession, registerAgain, signUp } from "./session.js";
 import { openDatabase } from "./storage/db.js";
 import { loadIdentity } from "./storage/identity-store.js";
 
@@ -137,7 +137,8 @@ describe("describeError", () => {
   it.each([
     ["invalid_invite", /invite code/i],
     ["network_error", /reach the server/i],
-    ["unauthorized", /clock/i],
+    ["unauthorized", /does not recognise this identity.*clock/is],
+    ["not_found", /no user with that ID/i],
   ])("explains %s in plain words", (code, pattern) => {
     expect(describeError(new ApiError(400, code))).toMatch(pattern);
   });
@@ -152,5 +153,60 @@ describe("describeError", () => {
 
   it("never shows raw non-error values", () => {
     expect(describeError({ secret: "x" })).toBe("Something went wrong.");
+  });
+});
+
+describe("registerAgain", () => {
+  it("registers the existing identity again with the same keys", async () => {
+    const first = await signUp({ db, client, inviteCode: "code", now: () => NOW });
+    registerCalls = [];
+
+    expect(await registerAgain({ db, client, inviteCode: " code " })).toBe("registered");
+    expect(registerCalls).toHaveLength(1);
+    expect(registerCalls[0]!.inviteCode).toBe("code");
+    expect(first.status === "registered" && registerCalls[0]!.identity.userId).toBe(
+      first.status === "registered" && first.identity.userId,
+    );
+    // Still the same single identity in storage.
+    expect((await loadIdentity(db))!.userId).toBe(registerCalls[0]!.identity.userId);
+  });
+
+  it("reports when the server already knows the identity", async () => {
+    await signUp({ db, client, inviteCode: "code", now: () => NOW });
+    registerResult = () => {
+      throw new ApiError(409, "already_registered");
+    };
+    expect(await registerAgain({ db, client, inviteCode: "code" })).toBe("already_registered");
+  });
+
+  it("passes on a refused invite code", async () => {
+    await signUp({ db, client, inviteCode: "code", now: () => NOW });
+    registerResult = () => {
+      throw new ApiError(403, "invalid_invite");
+    };
+    const error = await registerAgain({ db, client, inviteCode: "wrong" }).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_invite");
+  });
+
+  it("never creates an identity", async () => {
+    await expect(registerAgain({ db, client, inviteCode: "code" })).rejects.toThrow(/no identity/i);
+    expect(await loadSession(db)).toEqual({ status: "none" });
+    expect(registerCalls).toHaveLength(0);
+  });
+
+  it("rejects an empty invite code", async () => {
+    await signUp({ db, client, inviteCode: "code", now: () => NOW });
+    registerCalls = [];
+    await expect(registerAgain({ db, client, inviteCode: "" })).rejects.toThrow(/invite code/i);
+    expect(registerCalls).toHaveLength(0);
+  });
+});
+
+describe("isRejectedByServer", () => {
+  it("is true only for the server's 'unauthorized' answer", () => {
+    expect(isRejectedByServer(new ApiError(401, "unauthorized"))).toBe(true);
+    expect(isRejectedByServer(new ApiError(0, "network_error"))).toBe(false);
+    expect(isRejectedByServer(new ApiError(404, "not_found"))).toBe(false);
+    expect(isRejectedByServer(new Error("unauthorized"))).toBe(false);
   });
 });

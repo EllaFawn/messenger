@@ -24,6 +24,8 @@ export default defineConfig({
     proxy: {
       "/api": {
         target: API_TARGET,
+        // Also forward the push WebSocket (/api/ws).
+        ws: true,
         rewrite: (path) => path.replace(/^\/api/, ""),
       },
     },

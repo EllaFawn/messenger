@@ -56,7 +56,12 @@ function parseEnvelope(body: unknown): IncomingEnvelope | null {
   return { to, nonce: nonceBytes, ciphertext: ciphertextBytes };
 }
 
-export function messagesRouter(deps: AuthDeps): Router {
+export interface MessagesDeps extends AuthDeps {
+  /** Called after a message is stored, with the recipient's userID, so they can be told at once. */
+  onMessageStored?: (toUserId: string) => void;
+}
+
+export function messagesRouter(deps: MessagesDeps): Router {
   const router = Router();
 
   router.post("/messages", requireSignedRequest(deps), async (req, res) => {
@@ -83,6 +88,13 @@ export function messagesRouter(deps: AuthDeps): Router {
     }
 
     res.status(201).json({ message_id: row.message_id, created_at: row.created_at.toISOString() });
+
+    // Best effort: the inbox is the source of truth, so a failed nudge loses nothing.
+    try {
+      deps.onMessageStored?.(envelope.to);
+    } catch (err) {
+      console.error("push notify failed:", err);
+    }
   });
 
   // Every message for the caller that has not been acknowledged yet, oldest first.

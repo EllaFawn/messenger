@@ -85,3 +85,35 @@ export function signedFetch(
 
   return fetch(baseUrl + path, { method, headers, body: options.body });
 }
+
+export interface SignedWsOptions {
+  /** Unix ms; defaults to now. */
+  timestamp?: number;
+  nonce?: string;
+  /** Sign a different path than the one connected to. */
+  signPath?: string;
+  /** Replace or remove (undefined) individual query parameters after signing. */
+  params?: Record<string, string | undefined>;
+  path?: string;
+}
+
+/** Builds the URL a real client would use to open the push connection. */
+export function signedWsUrl(baseUrl: string, who: TestIdentity, options: SignedWsOptions = {}): string {
+  const timestamp = options.timestamp ?? Date.now();
+  const nonce = options.nonce ?? crypto.toBase64(crypto.randomBytes(16));
+  const signature = signRequest(
+    { method: "GET", path: options.signPath ?? "/ws", rawBody: new Uint8Array(0), timestamp, nonce },
+    who.identity.privateKey,
+  );
+  const params = new URLSearchParams({
+    user: who.userId,
+    ts: String(timestamp),
+    nonce,
+    sig: crypto.toBase64(signature),
+  });
+  for (const [name, value] of Object.entries(options.params ?? {})) {
+    if (value === undefined) params.delete(name);
+    else params.set(name, value);
+  }
+  return `${baseUrl.replace(/^http/, "ws")}${options.path ?? "/ws"}?${params.toString()}`;
+}

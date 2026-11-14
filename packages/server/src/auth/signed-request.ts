@@ -31,17 +31,19 @@ export interface AuthDeps {
   now?: () => number;
 }
 
-/** Reads and strictly validates the four auth headers. Returns null if any is missing or malformed. */
-export function parseSignedHeaders(req: Request): SignedHeaders | null {
-  const userId = req.get("x-user-id");
-  const timestamp = req.get("x-timestamp");
-  const nonce = req.get("x-nonce");
-  const signature = req.get("x-signature");
+/** Strictly validates the four auth values, wherever they were carried. Returns null if any is missing or malformed. */
+export function parseSignedValues(values: {
+  userId: string | null | undefined;
+  timestamp: string | null | undefined;
+  nonce: string | null | undefined;
+  signature: string | null | undefined;
+}): SignedHeaders | null {
+  const { userId, timestamp, nonce, signature } = values;
   if (
-    userId === undefined ||
-    timestamp === undefined ||
-    nonce === undefined ||
-    signature === undefined ||
+    userId == null ||
+    timestamp == null ||
+    nonce == null ||
+    signature == null ||
     !USER_ID_PATTERN.test(userId) ||
     !TIMESTAMP_PATTERN.test(timestamp) ||
     !NONCE_PATTERN.test(nonce) ||
@@ -57,13 +59,45 @@ export function parseSignedHeaders(req: Request): SignedHeaders | null {
   };
 }
 
+/** Reads and strictly validates the four auth headers. Returns null if any is missing or malformed. */
+export function parseSignedHeaders(req: Request): SignedHeaders | null {
+  return parseSignedValues({
+    userId: req.get("x-user-id"),
+    timestamp: req.get("x-timestamp"),
+    nonce: req.get("x-nonce"),
+    signature: req.get("x-signature"),
+  });
+}
+
+/** What was signed, independent of how the request arrived. */
+export interface SignedTarget {
+  method: string;
+  path: string;
+  rawBody: Uint8Array;
+}
+
 /**
  * Stateless half of the check: timestamp within the window, then the Ed25519
  * signature over the canonical string (method, path + query, body hash,
  * timestamp, nonce). Writes nothing.
  */
-export async function verifySignature(
+export function verifySignature(
   req: Request,
+  headers: SignedHeaders,
+  identityPublicKey: Uint8Array,
+  deps: AuthDeps,
+): Promise<boolean> {
+  return verifySignatureOver(
+    { method: req.method, path: req.originalUrl, rawBody: new Uint8Array(getRawBody(req)) },
+    headers,
+    identityPublicKey,
+    deps,
+  );
+}
+
+/** The same check for anything that is not an Express request, such as a WebSocket upgrade. */
+export async function verifySignatureOver(
+  target: SignedTarget,
   headers: SignedHeaders,
   identityPublicKey: Uint8Array,
   deps: AuthDeps,
@@ -77,9 +111,7 @@ export async function verifySignature(
   try {
     return verifyRequest(
       {
-        method: req.method,
-        path: req.originalUrl,
-        rawBody: new Uint8Array(getRawBody(req)),
+        ...target,
         timestamp: headers.timestamp,
         nonce: headers.nonce,
       },

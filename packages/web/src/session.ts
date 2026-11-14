@@ -62,6 +62,48 @@ export async function signUp(params: SignUpParams): Promise<Session> {
   return { status: "registered", identity: { ...identity, registeredAt } };
 }
 
+/**
+ * True when the server refused a signed request. The server deliberately
+ * gives one answer for every such failure, so this can mean it has no record
+ * of this identity (for example after its database was reset) or that this
+ * device's clock is more than a minute out.
+ */
+export function isRejectedByServer(error: unknown): boolean {
+  return error instanceof ApiError && error.code === "unauthorized";
+}
+
+/**
+ * Registers this browser's existing identity with the server again, with
+ * the same keys, so contacts and history are kept. Used when the server has
+ * lost its record of the account.
+ *
+ * Returns "already_registered" if the server does know the identity - in
+ * which case the rejections have another cause, most likely the clock.
+ */
+export async function registerAgain(params: {
+  db: IDBDatabase;
+  client: ApiClient;
+  inviteCode: string;
+}): Promise<"registered" | "already_registered"> {
+  const inviteCode = params.inviteCode.trim();
+  if (inviteCode === "") {
+    throw new Error("Enter the invite code.");
+  }
+  const identity = await loadIdentity(params.db);
+  if (identity === null) {
+    throw new Error("There is no identity in this browser to register.");
+  }
+  try {
+    await params.client.register(identity, inviteCode);
+    return "registered";
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "already_registered") {
+      return "already_registered";
+    }
+    throw error;
+  }
+}
+
 /** A short message for the screen. Never includes raw server output. */
 export function describeError(error: unknown): string {
   if (error instanceof ApiError) {
@@ -71,7 +113,9 @@ export function describeError(error: unknown): string {
       case "network_error":
         return "Could not reach the server. Check it is running and try again.";
       case "unauthorized":
-        return "The server rejected the request. Check this device's clock is correct and try again.";
+        return "The server rejected the request. Either it does not recognise this identity, or this device's clock is wrong.";
+      case "not_found":
+        return "The server has no user with that ID.";
       default:
         return `The server reported a problem (${error.code}).`;
     }

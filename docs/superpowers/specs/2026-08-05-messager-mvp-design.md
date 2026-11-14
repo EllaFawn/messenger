@@ -135,6 +135,8 @@ POST /messages/:id/ack                                        (signed) → delet
 
 Authorization: inbox returns only `to_user_id = caller`; ack verifies the row's recipient is the caller.
 
+**Push** (`GET /ws`, WebSocket): the server sends `{"type":"new_message"}` to every open connection of a message's recipient, and nothing else — no sender, id or content. The client responds by fetching its inbox, which stays the source of truth. Browsers cannot set headers on a WebSocket, so the four auth values travel as query parameters (`user`, `ts`, `nonce`, `sig`) signing method `GET`, path `/ws` and an empty body. The connection is authenticated before it is accepted, the nonce makes each URL single-use, clients may not send anything, and each user is limited to 5 connections.
+
 ## 7. Client
 
 - **Storage**: IndexedDB — identity/exchange private keys, contacts (userID + pinned pubkeys), decrypted message history, per-contact send counters and last-seen receive counters. History exists client-side only; clearing browser data destroys it. By design.
