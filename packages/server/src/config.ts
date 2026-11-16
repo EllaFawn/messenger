@@ -18,12 +18,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
 }
 
-/** Shorter codes are too easy to guess; registration has no rate limiting in M1. */
-export const MIN_INVITE_CODE_LENGTH = 20;
-
 export interface ServerConfig extends Config {
-  /** M1: the single static invite code required to register. */
-  inviteCode: string;
   host: string;
   port: number;
   /** Folder of the built web app to serve, or null to serve the API only. */
@@ -35,14 +30,6 @@ export function loadServerConfig(
   env: NodeJS.ProcessEnv = process.env,
   builtWebDir: string = DEFAULT_WEB_DIR,
 ): ServerConfig {
-  const inviteCode = env.INVITE_CODE ?? "";
-  if (inviteCode.length < MIN_INVITE_CODE_LENGTH) {
-    // Never include the value itself: this message ends up in logs.
-    throw new Error(
-      `INVITE_CODE must be set to at least ${MIN_INVITE_CODE_LENGTH} characters. Generate one with: openssl rand -base64 24`,
-    );
-  }
-
   const rawPort = env.PORT ?? "3000";
   const port = Number(rawPort);
   if (!/^\d+$/.test(rawPort) || port < 1 || port > 65535) {
@@ -65,7 +52,6 @@ export function loadServerConfig(
 
   return {
     ...loadConfig(env),
-    inviteCode,
     webDir,
     host: env.HOST || "127.0.0.1",
     port,

@@ -109,7 +109,7 @@ export function describeError(error: unknown): string {
   if (error instanceof ApiError) {
     switch (error.code) {
       case "invalid_invite":
-        return "That invite code was not accepted.";
+        return "That invite code was not accepted. Each code works once and expires; ask for a new one.";
       case "network_error":
         return "Could not reach the server. Check it is running and try again.";
       case "unauthorized":

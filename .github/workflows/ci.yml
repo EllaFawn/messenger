@@ -60,7 +60,6 @@ jobs:
       # serves the web app built in the step above.
       - name: Smoke test compiled server
         env:
-          INVITE_CODE: ci-smoke-test-invite-code-not-secret
           PORT: 3999
           SERVE_WEB: 1
         run: |

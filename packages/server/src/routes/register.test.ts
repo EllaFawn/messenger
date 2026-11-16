@@ -5,21 +5,22 @@ import { createApp } from "../app.js";
 import { TIMESTAMP_WINDOW_MS } from "../auth/signed-request.js";
 import { migrate } from "../db/migrate.js";
 import { createTestDatabase, type TestDatabase } from "../db/test-db.js";
-import { makeIdentity, signedFetch, type SignedFetchOptions, type TestIdentity } from "../test-client.js";
+import { issueInvite, makeIdentity, signedFetch, type SignedFetchOptions, type TestIdentity } from "../test-client.js";
 import { startTestServer, type TestServer } from "../test-http.js";
 
 const NOW = 1_800_000_000_000;
-const INVITE = "test-invite-code-0123456789";
 
 let db: TestDatabase;
 let server: TestServer;
 let alice: TestIdentity;
+/** A fresh, valid invite for each test. */
+let invite: string;
 
 beforeAll(async () => {
   await crypto.ready;
   db = await createTestDatabase();
   await migrate(db.pool);
-  server = await startTestServer(createApp({ pool: db.pool, inviteCode: INVITE, now: () => NOW }));
+  server = await startTestServer(createApp({ pool: db.pool, now: () => NOW }));
 });
 
 afterAll(async () => {
@@ -28,8 +29,9 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
   alice = makeIdentity();
+  invite = await issueInvite(db.pool);
 });
 
 function registrationBody(who: TestIdentity, overrides: Record<string, unknown> = {}): string {
@@ -38,13 +40,17 @@ function registrationBody(who: TestIdentity, overrides: Record<string, unknown> 
     identity_pubkey: crypto.toBase64(who.identity.publicKey),
     exchange_pubkey: crypto.toBase64(who.exchange.publicKey),
     exchange_sig: crypto.toBase64(who.exchangeSig),
-    inviteCode: INVITE,
+    inviteCode: invite,
     ...overrides,
   });
 }
 
 function register(signer: TestIdentity, body: string, options: Partial<SignedFetchOptions> = {}) {
   return signedFetch(server.url, signer, "/register", { method: "POST", body, timestamp: NOW, ...options });
+}
+
+async function inviteState(): Promise<{ used_at: Date | null; used_by: string | null }> {
+  return (await db.pool.query("SELECT used_at, used_by FROM invites ORDER BY created_at LIMIT 1")).rows[0];
 }
 
 async function count(table: "users" | "auth_nonces"): Promise<number> {
@@ -106,19 +112,83 @@ describe("POST /register", () => {
   });
 
   describe("invite code", () => {
-    it("rejects a wrong invite code", async () => {
+    it("marks the invite as used by the new user", async () => {
+      expect((await register(alice, registrationBody(alice))).status).toBe(201);
+      const state = await inviteState();
+      expect(state.used_by).toBe(alice.userId);
+      expect(state.used_at).toBeInstanceOf(Date);
+    });
+
+    it("rejects a code that was never issued", async () => {
       const res = await register(alice, registrationBody(alice, { inviteCode: "wrong-invite-code-000000000" }));
       await expectRejected(res, 403, "invalid_invite");
     });
 
-    it("rejects a code that only shares a prefix with the real one", async () => {
-      const res = await register(alice, registrationBody(alice, { inviteCode: INVITE.slice(0, -1) }));
+    it("rejects a code that only shares a prefix with a real one", async () => {
+      const res = await register(alice, registrationBody(alice, { inviteCode: invite.slice(0, -1) }));
       await expectRejected(res, 403, "invalid_invite");
+    });
+
+    it("lets an invite be used only once", async () => {
+      expect((await register(alice, registrationBody(alice))).status).toBe(201);
+      const bob = makeIdentity();
+      const res = await register(bob, registrationBody(bob));
+      expect(res.status).toBe(403);
+      expect(await res.json()).toEqual({ error: "invalid_invite" });
+      expect(await count("users")).toBe(1);
+    });
+
+    it("lets only one of several simultaneous registrations use the same invite", async () => {
+      const people = Array.from({ length: 6 }, () => makeIdentity());
+      const results = await Promise.all(people.map((who) => register(who, registrationBody(who))));
+      const statuses = results.map((res) => res.status).sort();
+      expect(statuses).toEqual([201, 403, 403, 403, 403, 403]);
+      expect(await count("users")).toBe(1);
+    });
+
+    it("rejects an expired invite", async () => {
+      await db.pool.query("UPDATE invites SET expires_at = now() - interval '1 second'");
+      const res = await register(alice, registrationBody(alice));
+      await expectRejected(res, 403, "invalid_invite");
+    });
+
+    it("gives the same answer for unknown, used and expired codes", async () => {
+      const unknown = await register(alice, registrationBody(alice, { inviteCode: "never-issued-code-0000000000" }));
+      const usedCode = await issueInvite(db.pool);
+      const carol = makeIdentity();
+      await register(carol, registrationBody(carol, { inviteCode: usedCode }));
+      const used = await register(alice, registrationBody(alice, { inviteCode: usedCode }));
+      await db.pool.query("UPDATE invites SET expires_at = now() - interval '1 second' WHERE used_at IS NULL");
+      const expired = await register(alice, registrationBody(alice));
+
+      const bodies = await Promise.all([unknown, used, expired].map((res) => res.text()));
+      expect([unknown.status, used.status, expired.status]).toEqual([403, 403, 403]);
+      expect(new Set(bodies).size).toBe(1);
     });
 
     it("does not store a nonce when the invite code is wrong", async () => {
       await register(alice, registrationBody(alice, { inviteCode: "wrong-invite-code-000000000" }));
       expect(await count("auth_nonces")).toBe(0);
+    });
+
+    it("does not use up the invite when the registration is refused for another reason", async () => {
+      // Signed by the wrong key.
+      const mallory = makeIdentity();
+      expect((await register(mallory, registrationBody(alice))).status).toBe(401);
+      // Malformed.
+      expect((await register(alice, registrationBody(alice, { identity_pubkey: "AAAA" }))).status).toBe(400);
+      expect((await inviteState()).used_at).toBeNull();
+      // And it still works afterwards.
+      expect((await register(alice, registrationBody(alice))).status).toBe(201);
+    });
+
+    it("does not use up a second invite when the user is already registered", async () => {
+      expect((await register(alice, registrationBody(alice))).status).toBe(201);
+      const second = await issueInvite(db.pool);
+      const res = await register(alice, registrationBody(alice, { inviteCode: second }));
+      expect(res.status).toBe(409);
+      const unused = await db.pool.query("SELECT count(*)::int AS n FROM invites WHERE used_at IS NULL");
+      expect(unused.rows[0].n).toBe(1);
     });
   });
 
@@ -177,8 +247,22 @@ describe("POST /register", () => {
       const first = await register(alice, body, { nonce });
       const second = await register(alice, body, { nonce });
       expect(first.status).toBe(201);
-      expect(second.status).toBe(401);
+      // The invite was used up by the first request, which is checked before the nonce.
+      expect(second.status).toBe(403);
       expect(await count("users")).toBe(1);
+    });
+
+    it("rejects a reused nonce even when the invite is still good", async () => {
+      // A signed request that fails at the last step leaves its invite unused...
+      const nonce = crypto.toBase64(crypto.randomBytes(16));
+      await db.pool.query(
+        "INSERT INTO auth_nonces (nonce, user_id, expires_at) VALUES ($1, $2, now() + interval '1 minute')",
+        [nonce, alice.userId],
+      );
+      // ...but the nonce has been seen, so the same request cannot be sent again.
+      const res = await register(alice, registrationBody(alice), { nonce });
+      await expectRejected(res, 401, "unauthorized");
+      expect((await inviteState()).used_at).toBeNull();
     });
 
     it("refuses to register the same user twice and never replaces stored keys", async () => {
@@ -191,6 +275,7 @@ describe("POST /register", () => {
         registrationBody(alice, {
           exchange_pubkey: crypto.toBase64(newExchangeKey),
           exchange_sig: crypto.toBase64(signExchangeKey(newExchangeKey, alice.identity.privateKey)),
+          inviteCode: await issueInvite(db.pool),
         }),
       );
 

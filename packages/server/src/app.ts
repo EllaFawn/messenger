@@ -34,8 +34,6 @@ export const CONTENT_SECURITY_POLICY = [
 
 export interface AppDeps {
   pool: Pool;
-  /** M1: single static invite code required by POST /register. */
-  inviteCode: string;
   /** Clock in unix ms; injectable for tests. */
   now?: () => number;
   /** Called with the recipient's userID after a message is stored. */

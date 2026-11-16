@@ -23,7 +23,6 @@ describe("startServer", () => {
   it("listens on the requested host, serves requests, and stops cleanly", async () => {
     const running = await startServer({
       pool: db.pool,
-      inviteCode: "a-long-enough-invite-code-123",
       host: "127.0.0.1",
       port: 0,
       sweepIntervalMs: 60_000,

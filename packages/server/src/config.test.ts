@@ -7,10 +7,8 @@ import {
   DEFAULT_WEB_DIR,
   loadConfig,
   loadServerConfig,
-  MIN_INVITE_CODE_LENGTH,
 } from "./config.js";
 
-const INVITE = "a-long-enough-invite-code-123";
 
 describe("loadConfig", () => {
   it("defaults to the docker-compose dev database", () => {
@@ -23,10 +21,9 @@ describe("loadConfig", () => {
 });
 
 describe("loadServerConfig", () => {
-  it("loads defaults when only INVITE_CODE is set", () => {
-    expect(loadServerConfig({ INVITE_CODE: INVITE })).toEqual({
+  it("loads defaults when nothing is set", () => {
+    expect(loadServerConfig({})).toEqual({
       databaseUrl: DEFAULT_DATABASE_URL,
-      inviteCode: INVITE,
       host: "127.0.0.1",
       port: 3000,
       webDir: null,
@@ -34,32 +31,19 @@ describe("loadServerConfig", () => {
   });
 
   it("reads HOST and PORT", () => {
-    const config = loadServerConfig({ INVITE_CODE: INVITE, HOST: "0.0.0.0", PORT: "8080" });
+    const config = loadServerConfig({ HOST: "0.0.0.0", PORT: "8080" });
     expect(config.host).toBe("0.0.0.0");
     expect(config.port).toBe(8080);
   });
 
-  it("refuses to start without an invite code", () => {
-    expect(() => loadServerConfig({})).toThrow(/INVITE_CODE/);
-    expect(() => loadServerConfig({ INVITE_CODE: "" })).toThrow(/INVITE_CODE/);
-  });
-
-  it("refuses an invite code that is too short to resist guessing", () => {
-    const short = "x".repeat(MIN_INVITE_CODE_LENGTH - 1);
-    expect(() => loadServerConfig({ INVITE_CODE: short })).toThrow(/INVITE_CODE/);
-  });
-
-  it("does not put the invite code in the error message", () => {
-    try {
-      loadServerConfig({ INVITE_CODE: "short-secret" });
-      expect.unreachable();
-    } catch (err) {
-      expect((err as Error).message).not.toContain("short-secret");
-    }
+  it("no longer needs or reads INVITE_CODE: invites are per person and live in the database", () => {
+    const config = loadServerConfig({ INVITE_CODE: "some-old-shared-code-0000000" });
+    expect(JSON.stringify(config)).not.toContain("some-old-shared-code");
+    expect(Object.keys(config).sort()).toEqual(["databaseUrl", "host", "port", "webDir"]);
   });
 
   it.each(["abc", "0", "70000", "-1", "3000.5", ""])("refuses an invalid PORT (%s)", (port) => {
-    expect(() => loadServerConfig({ INVITE_CODE: INVITE, PORT: port })).toThrow(/PORT/);
+    expect(() => loadServerConfig({ PORT: port })).toThrow(/PORT/);
   });
 });
 
@@ -75,26 +59,26 @@ describe("SERVE_WEB", () => {
   }
 
   it("is off by default, so the server is API-only", () => {
-    expect(loadServerConfig({ INVITE_CODE: INVITE }).webDir).toBeNull();
+    expect(loadServerConfig({}).webDir).toBeNull();
   });
 
   it.each(["1", "true"])("serves the built web app when set to %s", (value) => {
     withBuiltWeb((dir) => {
-      expect(loadServerConfig({ INVITE_CODE: INVITE, SERVE_WEB: value }, dir).webDir).toBe(dir);
+      expect(loadServerConfig({ SERVE_WEB: value }, dir).webDir).toBe(dir);
     });
   });
 
   it.each(["0", "false", ""])("stays off when set to %j", (value) => {
-    expect(loadServerConfig({ INVITE_CODE: INVITE, SERVE_WEB: value }).webDir).toBeNull();
+    expect(loadServerConfig({ SERVE_WEB: value }).webDir).toBeNull();
   });
 
   it("refuses a value it does not understand", () => {
-    expect(() => loadServerConfig({ INVITE_CODE: INVITE, SERVE_WEB: "yes please" })).toThrow(/SERVE_WEB/);
+    expect(() => loadServerConfig({ SERVE_WEB: "yes please" })).toThrow(/SERVE_WEB/);
   });
 
   it("refuses to start if the web app has not been built", () => {
     const missing = join(tmpdir(), "messager-web-does-not-exist");
-    expect(() => loadServerConfig({ INVITE_CODE: INVITE, SERVE_WEB: "1" }, missing)).toThrow(
+    expect(() => loadServerConfig({ SERVE_WEB: "1" }, missing)).toThrow(
       /npm run build -w @messager\/web/,
     );
   });

@@ -6,7 +6,9 @@
   "main": "./dist/index.js",
   "scripts": {
     "migrate": "tsc -b && node --env-file-if-exists=../../.env dist/db/migrate-cli.js",
-    "start": "tsc -b && node --env-file-if-exists=../../.env dist/index.js"
+    "start": "tsc -b && node --env-file-if-exists=../../.env dist/index.js",
+    "invite": "tsc -b && node --env-file-if-exists=../../.env dist/cli/admin-cli.js invite",
+    "user": "tsc -b && node --env-file-if-exists=../../.env dist/cli/admin-cli.js user"
   },
   "dependencies": {
     "@messager/crypto": "*",

@@ -21,7 +21,7 @@ beforeAll(async () => {
   db = await createTestDatabase();
   await migrate(db.pool);
   server = await startTestServer(
-    createApp({ pool: db.pool, inviteCode: "test-invite-code-0123456789", now: () => NOW }),
+    createApp({ pool: db.pool, now: () => NOW }),
   );
 });
 
@@ -31,7 +31,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
   alice = makeIdentity();
   bob = makeIdentity();
   await insertUser(db.pool, alice);

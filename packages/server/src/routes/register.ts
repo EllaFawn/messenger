@@ -1,4 +1,3 @@
-import { createHash, timingSafeEqual } from "node:crypto";
 import * as crypto from "@messager/crypto";
 import { deriveUserId, verifyExchangeKey } from "@messager/protocol";
 import { Router } from "express";
@@ -10,11 +9,8 @@ import {
   verifySignature,
   type AuthDeps,
 } from "../auth/signed-request.js";
+import { claimInvite, hashInviteCode, isInviteUsable } from "../invites.js";
 
-export interface RegisterDeps extends AuthDeps {
-  /** M1: single static invite code. */
-  inviteCode: string;
-}
 
 /** Standard base64 of exactly 32 bytes. */
 const KEY_PATTERN = /^[A-Za-z0-9+/]{43}=$/;
@@ -53,14 +49,7 @@ function parseRegistrationBody(body: unknown): RegistrationBody | null {
   return { userID, identity_pubkey, exchange_pubkey, exchange_sig, inviteCode };
 }
 
-/** Compares hashes in constant time so response timing does not reveal how much of the code matched. */
-function inviteCodeMatches(given: string, expected: string): boolean {
-  const a = createHash("sha256").update(given).digest();
-  const b = createHash("sha256").update(expected).digest();
-  return timingSafeEqual(a, b);
-}
-
-export function registerRouter(deps: RegisterDeps): Router {
+export function registerRouter(deps: AuthDeps): Router {
   const router = Router();
 
   router.post("/register", async (req, res) => {
@@ -97,9 +86,11 @@ export function registerRouter(deps: RegisterDeps): Router {
       return;
     }
 
-    // 3. Invite code. Checked before anything is written, because anyone can
-    //    make a key and sign with it - only the invite code is scarce.
-    if (!inviteCodeMatches(body.inviteCode, deps.inviteCode)) {
+    // 3. Invite code. Checked (read-only) before anything is written, because
+    //    anyone can make a key and sign with it - only an invite is scarce.
+    //    Unknown, used and expired codes are indistinguishable to the caller.
+    const inviteHash = hashInviteCode(body.inviteCode);
+    if (!(await isInviteUsable(deps.pool, inviteHash))) {
       res.status(403).json({ error: "invalid_invite" });
       return;
     }
@@ -110,21 +101,44 @@ export function registerRouter(deps: RegisterDeps): Router {
       return;
     }
 
-    // Existing users are never overwritten, so stored keys cannot be replaced.
-    const inserted = await deps.pool.query(
-      `INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (user_id) DO NOTHING`,
-      [
-        body.userID,
-        Buffer.from(identityPublicKey),
-        Buffer.from(exchangePublicKey),
-        Buffer.from(exchangeSignature),
-      ],
-    );
-    if (inserted.rowCount !== 1) {
-      res.status(409).json({ error: "already_registered" });
-      return;
+    // 5. Create the account and use up the invite together: either both
+    //    happen or neither does.
+    const client = await deps.pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // Existing users are never overwritten, so stored keys cannot be replaced.
+      const inserted = await client.query(
+        `INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (user_id) DO NOTHING`,
+        [
+          body.userID,
+          Buffer.from(identityPublicKey),
+          Buffer.from(exchangePublicKey),
+          Buffer.from(exchangeSignature),
+        ],
+      );
+      if (inserted.rowCount !== 1) {
+        await client.query("ROLLBACK");
+        res.status(409).json({ error: "already_registered" });
+        return;
+      }
+
+      // Someone else may have used the invite since the check above. The
+      // claim is a single atomic UPDATE, so only one registration can win.
+      if (!(await claimInvite(client, inviteHash, body.userID))) {
+        await client.query("ROLLBACK");
+        res.status(403).json({ error: "invalid_invite" });
+        return;
+      }
+
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw err;
+    } finally {
+      client.release();
     }
 
     res.status(201).json({ userID: body.userID });
