@@ -24,7 +24,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
   server = await startServer({
     pool: db.pool,
     inviteCode: "test-invite-code-0123456789",

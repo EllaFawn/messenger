@@ -28,7 +28,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
   alice = makeIdentity();
 });
 

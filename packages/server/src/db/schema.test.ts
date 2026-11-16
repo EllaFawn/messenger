@@ -19,7 +19,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
 });
 
 const SIG = Buffer.alloc(64, 3);
@@ -44,12 +44,13 @@ function insertMessage(from: string, to: string, nonce: Buffer = NONCE) {
 }
 
 describe("initial schema", () => {
-  it("creates the users, messages and auth_nonces tables", async () => {
+  it("creates exactly the expected tables", async () => {
     const result = await db.pool.query(
       "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
     );
     expect(result.rows.map((r) => r.table_name)).toEqual([
       "auth_nonces",
+      "invites",
       "messages",
       "schema_migrations",
       "users",
