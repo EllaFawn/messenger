@@ -21,7 +21,7 @@ beforeAll(async () => {
   db = await createTestDatabase();
   await migrate(db.pool);
   server = await startTestServer(
-    createApp({ pool: db.pool, inviteCode: "test-invite-code-0123456789", now: () => NOW }),
+    createApp({ pool: db.pool, now: () => NOW }),
   );
 });
 

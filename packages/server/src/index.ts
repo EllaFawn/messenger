@@ -15,6 +15,9 @@ await crypto.ready;
 const pool = createPool(config.databaseUrl);
 const server = await startServer({ ...config, pool });
 console.log(`Listening on ${server.url}`);
+if (process.env.INVITE_CODE) {
+  console.log("Note: INVITE_CODE is no longer used and can be removed from .env. Create invites with: npm run invite -w @messager/server -- create");
+}
 console.log(config.webDir === null ? "Serving the API only" : "Serving the web app and the API");
 
 let stopping = false;

@@ -10,7 +10,6 @@ import { startServer, type RunningServer } from "./server.js";
 import { insertUser, makeIdentity, signedFetch, signedWsUrl, type TestIdentity } from "./test-client.js";
 import { startTestServer, type TestServer } from "./test-http.js";
 
-const INVITE = "test-invite-code-0123456789";
 const INDEX_HTML = '<!doctype html><title>Messager</title><script type="module" src="/assets/app-abc123.js"></script>';
 
 let db: TestDatabase;
@@ -31,8 +30,8 @@ beforeAll(async () => {
   await writeFile(join(webDir, "assets", "app-abc123.js"), "console.log('app');");
   await writeFile(join(webDir, ".secret"), "do not serve");
 
-  withWeb = await startTestServer(createApp({ pool: db.pool, inviteCode: INVITE, webDir }));
-  apiOnly = await startTestServer(createApp({ pool: db.pool, inviteCode: INVITE }));
+  withWeb = await startTestServer(createApp({ pool: db.pool, webDir }));
+  apiOnly = await startTestServer(createApp({ pool: db.pool }));
 });
 
 afterAll(async () => {
@@ -187,7 +186,7 @@ describe("push through the /api prefix", () => {
   let running: RunningServer;
 
   beforeEach(async () => {
-    running = await startServer({ pool: db.pool, inviteCode: INVITE, host: "127.0.0.1", port: 0, webDir });
+    running = await startServer({ pool: db.pool, host: "127.0.0.1", port: 0, webDir });
   });
 
   it("accepts the push connection at /api/ws and serves the page from the same server", async () => {

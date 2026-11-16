@@ -101,7 +101,7 @@ describe("createApp", () => {
   it("serves the base routes and fallbacks", async () => {
     // The pool connects lazily; these routes never query it.
     const pool = createPool(loadConfig().databaseUrl);
-    const real = await startTestServer(createApp({ pool, inviteCode: "test-invite-code-0123456789" }));
+    const real = await startTestServer(createApp({ pool, }));
     try {
       expect((await fetch(real.url + "/health")).status).toBe(200);
       expect((await fetch(real.url + "/nope")).status).toBe(404);

@@ -13,6 +13,7 @@ import { IDBFactory } from "fake-indexeddb";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { migrate } from "../packages/server/src/db/migrate.js";
 import { createTestDatabase, type TestDatabase } from "../packages/server/src/db/test-db.js";
+import { createInvite } from "../packages/server/src/invites.js";
 import { startServer, type RunningServer } from "../packages/server/src/server.js";
 import { ApiError, createApiClient, type ApiClient } from "../packages/web/src/api/client.js";
 import { receiveMessages, sendChatMessage } from "../packages/web/src/chat.js";
@@ -24,7 +25,6 @@ import { getContact } from "../packages/web/src/storage/contact-store.js";
 import { openDatabase } from "../packages/web/src/storage/db.js";
 import { listMessages } from "../packages/web/src/storage/message-store.js";
 
-const INVITE = "e2e-invite-code-0123456789";
 
 let db: TestDatabase;
 let server: RunningServer;
@@ -49,7 +49,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
-  server = await startServer({ pool: db.pool, inviteCode: INVITE, host: "127.0.0.1", port: 0 });
+  server = await startServer({ pool: db.pool, host: "127.0.0.1", port: 0 });
   // Through the /api prefix, exactly as the page reaches the server.
   client = createApiClient({ baseUrl: `${server.url}/api` });
   stops = [];
@@ -60,9 +60,14 @@ afterEach(async () => {
   await server.close();
 });
 
+/** What the operator does on the server for each person they let in. */
+async function invite(): Promise<string> {
+  return (await createInvite(db.pool, { note: "e2e", expiresAt: new Date(Date.now() + 3_600_000) })).code;
+}
+
 async function newBrowser(): Promise<Browser> {
   const storage = await openDatabase(new IDBFactory());
-  const session = await signUp({ db: storage, client, inviteCode: INVITE });
+  const session = await signUp({ db: storage, client, inviteCode: await invite() });
   if (session.status !== "registered") throw new Error("sign-up did not complete");
   return { storage, me: session.identity };
 }
@@ -223,9 +228,9 @@ describe("a misbehaving server", () => {
 });
 
 describe("signing up", () => {
-  it("refuses a wrong invite code, keeps the keys, and succeeds on retry", async () => {
+  it("refuses an invite that was never issued, keeps the keys, and succeeds with a real one", async () => {
     const storage = await openDatabase(new IDBFactory());
-    const error = await signUp({ db: storage, client, inviteCode: "not-the-invite-code-000000" }).catch(
+    const error = await signUp({ db: storage, client, inviteCode: "not-a-code-that-was-ever-issued" }).catch(
       (e: unknown) => e,
     );
     expect((error as ApiError).code).toBe("invalid_invite");
@@ -233,11 +238,22 @@ describe("signing up", () => {
 
     const pending = await loadSession(storage);
     expect(pending.status).toBe("unregistered");
-    const session = await signUp({ db: storage, client, inviteCode: INVITE });
+    const session = await signUp({ db: storage, client, inviteCode: await invite() });
     expect(session.status).toBe("registered");
     expect(session.status === "registered" && pending.status === "unregistered" && session.identity.userId).toBe(
       pending.status === "unregistered" && pending.identity.userId,
     );
+    expect(await serverCount("users")).toBe(1);
+  });
+
+  it("lets one invite bring in exactly one person", async () => {
+    const code = await invite();
+    const first = await openDatabase(new IDBFactory());
+    const second = await openDatabase(new IDBFactory());
+    expect((await signUp({ db: first, client, inviteCode: code })).status).toBe("registered");
+
+    const error = await signUp({ db: second, client, inviteCode: code }).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_invite");
     expect(await serverCount("users")).toBe(1);
   });
 
@@ -250,8 +266,8 @@ describe("signing up", () => {
     const refused = await check(alice).catch((e: unknown) => e);
     expect(isRejectedByServer(refused)).toBe(true);
 
-    expect(await registerAgain({ db: alice.storage, client, inviteCode: INVITE })).toBe("registered");
-    expect(await registerAgain({ db: bob.storage, client, inviteCode: INVITE })).toBe("registered");
+    expect(await registerAgain({ db: alice.storage, client, inviteCode: await invite() })).toBe("registered");
+    expect(await registerAgain({ db: bob.storage, client, inviteCode: await invite() })).toBe("registered");
     // Same keys as before, so the contacts they pinned for each other still work.
     await say(alice, bob, "still me");
     expect((await check(bob)).stored).toBe(1);

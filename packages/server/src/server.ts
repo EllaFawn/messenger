@@ -7,7 +7,6 @@ import { createPushHub } from "./push.js";
 
 export interface StartServerOptions {
   pool: Pool;
-  inviteCode: string;
   host: string;
   /** 0 picks a free port. */
   port: number;
@@ -45,7 +44,6 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
   const push = createPushHub({ pool: options.pool });
   const app = createApp({
     pool: options.pool,
-    inviteCode: options.inviteCode,
     onMessageStored: push.notify,
     webDir: options.webDir ?? undefined,
   });

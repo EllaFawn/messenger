@@ -4,10 +4,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import { migrate } from "./db/migrate.js";
 import { createTestDatabase, type TestDatabase } from "./db/test-db.js";
-import { makeIdentity, signedFetch, type TestIdentity } from "./test-client.js";
+import { issueInvite, makeIdentity, signedFetch, type TestIdentity } from "./test-client.js";
 import { startTestServer, type TestServer } from "./test-http.js";
 
-const INVITE_CODE = "test-invite-code-0123456789";
 
 let db: TestDatabase;
 let server: TestServer;
@@ -17,7 +16,7 @@ beforeAll(async () => {
   db = await createTestDatabase();
   await migrate(db.pool);
   // Real clock: this test goes through every route the way a client would.
-  server = await startTestServer(createApp({ pool: db.pool, inviteCode: INVITE_CODE }));
+  server = await startTestServer(createApp({ pool: db.pool }));
 });
 
 afterAll(async () => {
@@ -39,7 +38,7 @@ async function register(who: TestIdentity): Promise<void> {
     identity_pubkey: crypto.toBase64(who.identity.publicKey),
     exchange_pubkey: crypto.toBase64(who.exchange.publicKey),
     exchange_sig: crypto.toBase64(who.exchangeSig),
-    inviteCode: INVITE_CODE,
+    inviteCode: await issueInvite(db.pool),
   });
   expect(res.status).toBe(201);
 }

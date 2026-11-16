@@ -1,6 +1,7 @@
 import * as crypto from "@messager/crypto";
 import { deriveUserId, signExchangeKey, signRequest } from "@messager/protocol";
 import type { Pool } from "./db/pool.js";
+import { createInvite } from "./invites.js";
 
 /** A throwaway user for tests: both keypairs plus the derived userID. */
 export interface TestIdentity {
@@ -32,6 +33,11 @@ export async function insertUser(pool: Pool, who: TestIdentity): Promise<void> {
       Buffer.from(who.exchangeSig),
     ],
   );
+}
+
+/** A fresh single-use invite code, valid for an hour. */
+export async function issueInvite(pool: Pool): Promise<string> {
+  return (await createInvite(pool, { note: "test", expiresAt: new Date(Date.now() + 3_600_000) })).code;
 }
 
 export interface SignedFetchOptions {
