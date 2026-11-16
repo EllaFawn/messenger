@@ -1,6 +1,6 @@
 # Messager — M2 Design
 
-Status: **draft for review**. Not yet approved; section 11 lists the decisions still open.
+Status: approved for implementation planning (2026-11-16). Section 11 records the decisions taken at review.
 
 Follows `2026-08-05-messager-mvp-design.md` (M1), which is built and merged. M1's rule still stands: M2 must be complete before the app has any user beyond the original two.
 
@@ -274,6 +274,8 @@ internet ──443──> Caddy (HTTPS, automatic certificates)
 
 **Dependencies:** `npm ci` from the lockfile; Dependabot for npm, Actions and base images.
 
+**Changing this later.** Docker Compose is packaging, not architecture: the app is one Node process that needs a Postgres URL, and nothing in the code knows it runs in a container. Moving to a managed database, a different host, or a platform service later means changing settings and the deploy document, not the app. Two things are tied to running a single app process and would need work before running several behind a load balancer: the in-memory rate limits (P2) and the in-memory list of push connections. Both would move to a shared store such as Redis. Neither is needed at this scale.
+
 ## 8. Threat model after M2
 
 Improved:
@@ -317,10 +319,12 @@ The README keeps its warning: prototype, no independent security review.
 
 P1 and P2 are small, independent, and needed before anything faces the internet. P3 is the bulk of the work and the only piece with real technical uncertainty, which is why its spike can start early alongside the others. P4 follows P3 because restoring an account changes ratchet keys.
 
-## 11. Open decisions
+## 11. Decisions taken at review (2026-11-16)
 
-1. **Can the VPS go live before the ratchet is finished?** The M1 design says no user beyond the original two until M2 is complete. Two weeks is realistic for P1, P2 and P5, not for P3. Recommended: deploy after step 3 **for the original two users only**, and invite nobody else until P3 and P4 are merged. This keeps M1's rule intact.
-2. **A contact restores their account: notice or block?** Recommended: notice (section 6). Blocking is safer against a stolen backup file, but anyone with the file and passphrase holds the identity key anyway.
-3. **Is message history included in a backup by default?** Recommended: off by default, with a checkbox. The file is the most sensitive thing the app produces.
-4. **Clean break at P3** (accounts and messages wiped, as with migration 002)? Recommended: yes.
-5. **Docker Compose on the VPS, or Node and Postgres installed directly?** Recommended: Compose, since it matches what is already used in development and makes the laptop test identical to production.
+1. **Going live.** Nobody beyond the original two users is invited until the operator judges the whole of M2 ready. The VPS may be set up and used by the original two for private testing once P1, P2 and P5 are merged; that keeps M1's rule intact.
+2. **A contact restores their account:** show a notice in the conversation and keep sending (section 6). Not a block: the new key is signed by the identity key already pinned, and anyone holding the backup file and its passphrase holds that identity key anyway.
+3. **Message history in a backup:** off by default, with a checkbox. The file is the most sensitive thing the app produces.
+4. **Clean break at P3:** yes. Accounts and undelivered messages are wiped by the migration, as with migration 002.
+5. **On the VPS:** Docker Compose. See "Changing this later" in section 7 for what a move to a larger production setup would involve.
+
+Still to settle, inside P3: the ratchet library, decided by the spike in section 5.3.
