@@ -43,6 +43,8 @@ What M2 must fix:
 
 ## 3. P1 — Per-person invites
 
+Status: built (`feature/per-person-invites`). As built, `revoke` takes the invite id shown by `list`, `user remove` requires `--yes`, and `user list` was added.
+
 The operator creates one single-use invite per person from a command on the server. Nobody else can create invites.
 
 **Data**

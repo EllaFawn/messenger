@@ -57,20 +57,41 @@ to run if it has changed.
 ## Running the server
 
 ```
-cp .env.example .env                    # then set INVITE_CODE (openssl rand -base64 24)
 npm run migrate -w @messager/server
 npm run start -w @messager/server       # http://127.0.0.1:3000
 ```
 
-The server refuses to start without an `INVITE_CODE` of at least 20
-characters. `.env` is git-ignored; never commit it.
+Settings are optional; see `.env.example`. `.env` is git-ignored; never
+commit it.
+
+## Invites and accounts
+
+Nobody can register without an invite, and only the operator can create
+one. These commands talk to the database directly and have no network
+route, so they can only be run by someone with access to the server.
+
+```
+npm run invite -w @messager/server -- create --note "for Sam"   # optional: --expires 12h (default 7d)
+npm run invite -w @messager/server -- list
+npm run invite -w @messager/server -- revoke <invite id>
+npm run user   -w @messager/server -- list
+npm run user   -w @messager/server -- remove <userID> --yes
+```
+
+- `create` prints a code **once**. It registers one account and then stops
+  working. Only its hash is stored, so it cannot be shown again.
+- `list` shows each invite's id, note and whether it is unused, used (and
+  by whom) or expired. It never shows a code.
+- `revoke` cancels an unused invite.
+- `user remove` deletes an account and its undelivered messages. The
+  person's invite stays used, so they cannot come back with it.
 
 Routes so far:
 
 | Route | Auth | Purpose |
 |---|---|---|
 | `GET /health` | none | Liveness check |
-| `POST /register` | signed by the key being registered + invite code | Create an account |
+| `POST /register` | signed by the key being registered + a single-use invite | Create an account |
 | `GET /users/:userID/pubkeys` | signed | Fetch a user's public keys |
 | `POST /messages` | signed | Send an encrypted message; the sender is taken from the signature |
 | `GET /messages/inbox` | signed | The caller's unacknowledged messages, oldest first, up to 100 |
@@ -92,8 +113,8 @@ The dev server only listens on your own machine. Requests to `/api/...` are
 forwarded to the server on port 3000, so the browser talks to one address
 and the server needs no cross-origin (CORS) settings.
 
-On first visit the app asks for the invite code (the `INVITE_CODE` value in
-`.env`), creates your keys in the browser, registers them and shows your
+On first visit the app asks for an invite code (see "Invites and accounts"
+above), creates your keys in the browser, registers them and shows your
 userID. The private keys are stored only in that browser's IndexedDB;
 clearing the site's data deletes them for good.
 
