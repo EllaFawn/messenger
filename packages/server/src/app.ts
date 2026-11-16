@@ -1,8 +1,9 @@
 import { sep } from "node:path";
 import express, { type ErrorRequestHandler, type Express } from "express";
 import type { Pool } from "./db/pool.js";
+import { guardFailedAuth, type LimitDeps } from "./limits.js";
 import { getRawBody, rememberRawBody } from "./raw-body.js";
-import { messagesRouter } from "./routes/messages.js";
+import { messagesRouter, type QueueLimits } from "./routes/messages.js";
 import { registerRouter } from "./routes/register.js";
 import { usersRouter } from "./routes/users.js";
 
@@ -32,7 +33,7 @@ export const CONTENT_SECURITY_POLICY = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-export interface AppDeps {
+export interface AppDeps extends LimitDeps {
   pool: Pool;
   /** Clock in unix ms; injectable for tests. */
   now?: () => number;
@@ -40,6 +41,8 @@ export interface AppDeps {
   onMessageStored?: (toUserId: string) => void;
   /** Folder holding the built web app. If set, the server serves it alongside the API. */
   webDir?: string;
+  queueLimits?: QueueLimits;
+  inboxPageSize?: number;
 }
 
 /** Removes the /api prefix from a request path, or returns null if it has none. */
@@ -51,7 +54,7 @@ export function stripApiPrefix(url: string): string | null {
 }
 
 /** Body parsing and routes that need no dependencies. Add routes, then call installFallbackHandlers. */
-export function createBaseApp(): Express {
+export function createBaseApp(limits: LimitDeps = {}): Express {
   const app = express();
   app.disable("x-powered-by");
 
@@ -75,6 +78,10 @@ export function createBaseApp(): Express {
     }
     next();
   });
+
+  // Before body parsing, so an address that is being refused costs as little as possible.
+  app.use(guardFailedAuth(limits));
+
   app.use(
     express.json({
       limit: MAX_BODY_BYTES,
@@ -116,7 +123,7 @@ export function installFallbackHandlers(app: Express): void {
 }
 
 export function createApp(deps: AppDeps): Express {
-  const app = createBaseApp();
+  const app = createBaseApp(deps);
   app.use(registerRouter(deps));
   app.use(usersRouter(deps));
   app.use(messagesRouter(deps));

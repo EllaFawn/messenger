@@ -11,6 +11,9 @@ import {
   type HistoryMessage,
 } from "./storage/message-store.js";
 
+/** A bound on one check, in case a server keeps returning pages for ever. */
+const MAX_INBOX_PAGES = 200;
+
 /** Keeps the encrypted, base64-encoded request comfortably under the server's 16 KB body limit. */
 export const MAX_TEXT_BYTES = 8000;
 
@@ -105,7 +108,26 @@ export async function receiveMessages(params: {
   const { db, client, me } = params;
   const result: ReceiveResult = { stored: 0, dropped: 0, unknownSenders: [], heldForKeyChange: 0 };
 
-  for (const item of await client.fetchInbox(me)) {
+  // Walk the whole inbox a page at a time. Messages left on the server
+  // (unknown sender, unresolved key change) are stepped past, so they never
+  // hold up the ones behind them.
+  let after: string | undefined;
+  for (let pageNumber = 0; pageNumber < MAX_INBOX_PAGES; pageNumber++) {
+    const page = await client.fetchInbox(me, after);
+    if (page.length === 0) break;
+    after = page[page.length - 1]!.cursor;
+    await processPage(params, page, result);
+  }
+  return result;
+}
+
+async function processPage(
+  params: { db: IDBDatabase; client: ApiClient; me: StoredIdentity },
+  page: InboxItem[],
+  result: ReceiveResult,
+): Promise<void> {
+  const { db, client, me } = params;
+  for (const item of page) {
     const contact = await getContact(db, item.from);
     if (contact === null) {
       if (!result.unknownSenders.includes(item.from)) {
@@ -143,5 +165,4 @@ export async function receiveMessages(params: {
       // The server will offer it again; the counter check makes that harmless.
     }
   }
-  return result;
 }

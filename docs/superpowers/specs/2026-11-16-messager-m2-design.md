@@ -88,6 +88,8 @@ If no row is updated the transaction rolls back. Unknown, used and expired codes
 
 ## 4. P2 — Rate limiting and abuse limits
 
+Status: built (`feature/rate-limits`). As built, key claims (P3) are not yet limited because they do not exist yet; the inbox cursor is the creation time in microseconds plus the message id; and an address that exceeds the failed-authentication limit is refused on every route until it recovers.
+
 One process on one server, so limits are kept in memory. No new dependency.
 
 **Request limits** (token bucket; `429 rate_limited` with `Retry-After`):

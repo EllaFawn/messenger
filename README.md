@@ -94,12 +94,34 @@ Routes so far:
 | `POST /register` | signed by the key being registered + a single-use invite | Create an account |
 | `GET /users/:userID/pubkeys` | signed | Fetch a user's public keys |
 | `POST /messages` | signed | Send an encrypted message; the sender is taken from the signature |
-| `GET /messages/inbox` | signed | The caller's unacknowledged messages, oldest first, up to 100 |
+| `GET /messages/inbox` | signed | The caller's unacknowledged messages, oldest first, 100 per page (`?after=<cursor>` for the next) |
 | `POST /messages/:id/ack` | signed, recipient only | Confirm receipt; the server deletes the message |
 | `GET /ws` (WebSocket) | signed, via query parameters | Tells you at once when a message arrives; carries no content |
 
 Signed requests carry `X-User-ID`, `X-Timestamp`, `X-Nonce` and
 `X-Signature`; see design section 4.
+
+## Limits
+
+A running server always applies these. Refusals are `429` with a
+`Retry-After` header.
+
+| What | Counted per | Limit |
+|---|---|---|
+| Registrations | client address | 5 per hour |
+| Requests that fail authentication | client address | 30 per minute, then that address is refused entirely |
+| Push connection attempts | client address | 20 per minute |
+| Messages sent | sender | 60 per minute |
+| Public-key lookups | caller | 30 per minute |
+| Other signed requests | caller | 300 per minute |
+
+- A recipient holds at most 500 undelivered messages from one sender and
+  5,000 in total; undelivered messages are deleted after 30 days.
+- Push connections are capped at 5 per user, 20 per client address and
+  1,000 in total.
+- Limits live in the server's memory, which suits a single server process.
+- Behind a reverse proxy, set `TRUST_PROXY` (see `.env.example`), or every
+  visitor will share the proxy's address and its limits.
 
 ## Running the web app
 

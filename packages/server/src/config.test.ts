@@ -27,6 +27,7 @@ describe("loadServerConfig", () => {
       host: "127.0.0.1",
       port: 3000,
       webDir: null,
+      trustedProxies: 0,
     });
   });
 
@@ -39,7 +40,7 @@ describe("loadServerConfig", () => {
   it("no longer needs or reads INVITE_CODE: invites are per person and live in the database", () => {
     const config = loadServerConfig({ INVITE_CODE: "some-old-shared-code-0000000" });
     expect(JSON.stringify(config)).not.toContain("some-old-shared-code");
-    expect(Object.keys(config).sort()).toEqual(["databaseUrl", "host", "port", "webDir"]);
+    expect(Object.keys(config).sort()).toEqual(["databaseUrl", "host", "port", "trustedProxies", "webDir"]);
   });
 
   it.each(["abc", "0", "70000", "-1", "3000.5", ""])("refuses an invalid PORT (%s)", (port) => {
@@ -85,5 +86,20 @@ describe("SERVE_WEB", () => {
 
   it("looks for the build in the web package by default", () => {
     expect(DEFAULT_WEB_DIR.replaceAll("\\", "/")).toMatch(/packages\/web\/dist$/);
+  });
+});
+
+describe("TRUST_PROXY", () => {
+  it("defaults to trusting no proxy, so forwarded addresses are ignored", () => {
+    expect(loadServerConfig({}).trustedProxies).toBe(0);
+    expect(loadServerConfig({ TRUST_PROXY: "" }).trustedProxies).toBe(0);
+  });
+
+  it("reads the number of proxies", () => {
+    expect(loadServerConfig({ TRUST_PROXY: "1" }).trustedProxies).toBe(1);
+  });
+
+  it.each(["true", "-1", "6", "1.5", "all"])("refuses %j", (value) => {
+    expect(() => loadServerConfig({ TRUST_PROXY: value })).toThrow(/TRUST_PROXY/);
   });
 });

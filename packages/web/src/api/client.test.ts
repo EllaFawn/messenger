@@ -299,6 +299,7 @@ describe("messages", () => {
       nonce: crypto.toBase64(crypto.randomBytes(24)),
       ciphertext: crypto.toBase64(crypto.randomBytes(40)),
       created_at: "2027-01-15T08:00:00.000Z",
+      cursor: `1800000000000000_${MESSAGE_ID}`,
       ...overrides,
     };
   }
@@ -335,10 +336,26 @@ describe("messages", () => {
         nonce: entry.nonce,
         ciphertext: entry.ciphertext,
         createdAt: entry.created_at,
+        cursor: entry.cursor,
       },
     ]);
     expect(seen[0]!.url).toBe("/api/messages/inbox");
     expect(signatureIsValid(seen[0]!, "/messages/inbox")).toBe(true);
+  });
+
+  it("asks for the next page with a cursor, and signs the path including it", async () => {
+    respond = () => json(200, []);
+    const cursor = `1800000000000000_${MESSAGE_ID}`;
+    await client.fetchInbox(identity, cursor);
+    expect(seen[0]!.url).toBe(`/api/messages/inbox?after=${cursor}`);
+    expect(signatureIsValid(seen[0]!, `/messages/inbox?after=${cursor}`)).toBe(true);
+    expect(signatureIsValid(seen[0]!, "/messages/inbox")).toBe(false);
+  });
+
+  it("refuses to put anything but a cursor into the request path", async () => {
+    const error = await client.fetchInbox(identity, "1&x=../../register").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_request");
+    expect(seen).toHaveLength(0);
   });
 
   it("returns an empty list for an empty inbox", async () => {
@@ -356,6 +373,8 @@ describe("messages", () => {
     ["an entry whose ciphertext is not base64", () => ([inboxEntry({ ciphertext: "<script>" })]) as unknown],
     ["an entry with an oversized ciphertext", () => ([inboxEntry({ ciphertext: "A".repeat(64 * 1024 + 4) })]) as unknown],
     ["an entry with a bad date", () => ([inboxEntry({ created_at: "yesterday" })]) as unknown],
+    ["an entry with no cursor", () => ([inboxEntry({ cursor: undefined })]) as unknown],
+    ["an entry with a malformed cursor", () => ([inboxEntry({ cursor: "next page please" })]) as unknown],
     ["an entry that is not an object", () => (["text"]) as unknown],
     ["one bad entry among good ones", () => ([inboxEntry(), inboxEntry({ from: 5 })]) as unknown],
   ])("rejects %s", async (_name, makeBody) => {

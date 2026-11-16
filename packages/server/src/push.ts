@@ -1,6 +1,7 @@
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { WebSocketServer, type WebSocket } from "ws";
+import { clientIp } from "./rate-limit.js";
 import {
   parseSignedValues,
   recordNonce,
@@ -11,6 +12,15 @@ import {
 /** The only path that accepts a WebSocket. */
 export const PUSH_PATH = "/ws";
 export const MAX_PUSH_CONNECTIONS_PER_USER = 5;
+export const DEFAULT_MAX_PUSH_CONNECTIONS_PER_IP = 20;
+export const DEFAULT_MAX_PUSH_CONNECTIONS = 1000;
+
+export interface PushOptions {
+  /** Most connections one client address may hold open. */
+  maxPerIp?: number;
+  /** Most connections in total. */
+  maxTotal?: number;
+}
 /** Clients never send anything, so there is no reason to accept more than a tiny frame. */
 const MAX_INCOMING_BYTES = 256;
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -43,31 +53,41 @@ function refuse(socket: Duplex, status: 401 | 404 | 429): void {
  * set headers on a WebSocket, so the four values travel as query parameters;
  * the nonce makes each connection URL single-use.
  */
-export function createPushHub(deps: AuthDeps): PushHub {
+export function createPushHub(deps: AuthDeps, options: PushOptions = {}): PushHub {
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_INCOMING_BYTES });
   const connections = new Map<string, Set<WebSocket>>();
+  const perIp = new Map<string, number>();
+  let total = 0;
+  const maxPerIp = options.maxPerIp ?? DEFAULT_MAX_PUSH_CONNECTIONS_PER_IP;
+  const maxTotal = options.maxTotal ?? DEFAULT_MAX_PUSH_CONNECTIONS;
+  const trustedProxies = deps.trustedProxies ?? 0;
   const alive = new WeakSet<WebSocket>();
 
-  function remove(userId: string, ws: WebSocket): void {
+  function remove(userId: string, ip: string, ws: WebSocket): void {
     const set = connections.get(userId);
-    if (set === undefined) return;
-    set.delete(ws);
+    if (set === undefined || !set.delete(ws)) return;
     if (set.size === 0) connections.delete(userId);
+    total -= 1;
+    const left = (perIp.get(ip) ?? 1) - 1;
+    if (left <= 0) perIp.delete(ip);
+    else perIp.set(ip, left);
   }
 
-  function accept(userId: string, ws: WebSocket): void {
+  function accept(userId: string, ip: string, ws: WebSocket): void {
     let set = connections.get(userId);
     if (set === undefined) {
       set = new Set();
       connections.set(userId, set);
     }
     set.add(ws);
+    total += 1;
+    perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
     alive.add(ws);
 
     ws.on("pong", () => alive.add(ws));
     // Clients only listen. Anything they send is a protocol violation.
     ws.on("message", () => ws.close(1008, "unexpected message"));
-    ws.on("close", () => remove(userId, ws));
+    ws.on("close", () => remove(userId, ip, ws));
     ws.on("error", () => ws.terminate());
   }
 
@@ -111,17 +131,38 @@ export function createPushHub(deps: AuthDeps): PushHub {
       return;
     }
 
+    // Cheap checks first, before any database work.
+    const ip = clientIp(req, trustedProxies);
+    const limiters = deps.limiters;
+    if (
+      limiters !== undefined &&
+      (!limiters.failedAuth.check(ip).allowed || !limiters.wsUpgrade.take(ip).allowed)
+    ) {
+      refuse(socket, 429);
+      return;
+    }
+    if (total >= maxTotal || (perIp.get(ip) ?? 0) >= maxPerIp) {
+      refuse(socket, 429);
+      return;
+    }
+
     authenticate(req).then(
       (userId) => {
         if (userId === null) {
+          limiters?.failedAuth.take(ip);
           refuse(socket, 401);
           return;
         }
-        if ((connections.get(userId)?.size ?? 0) >= MAX_PUSH_CONNECTIONS_PER_USER) {
+        // Re-checked: other connections may have been accepted while this one was being verified.
+        if (
+          (connections.get(userId)?.size ?? 0) >= MAX_PUSH_CONNECTIONS_PER_USER ||
+          total >= maxTotal ||
+          (perIp.get(ip) ?? 0) >= maxPerIp
+        ) {
           refuse(socket, 429);
           return;
         }
-        wss.handleUpgrade(req, socket, head, (ws) => accept(userId, ws));
+        wss.handleUpgrade(req, socket, head, (ws) => accept(userId, ip, ws));
       },
       (err: unknown) => {
         console.error("push upgrade failed:", err);
@@ -155,8 +196,6 @@ export function createPushHub(deps: AuthDeps): PushHub {
     },
     handleUpgrade,
     connectionCount() {
-      let total = 0;
-      for (const set of connections.values()) total += set.size;
       return total;
     },
     close() {

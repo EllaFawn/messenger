@@ -1,11 +1,16 @@
 import { Router } from "express";
+import { limitByCaller } from "../limits.js";
 import { requireSignedRequest, USER_ID_PATTERN, type AuthDeps } from "../auth/signed-request.js";
 
 export function usersRouter(deps: AuthDeps): Router {
   const router = Router();
 
   // Public data only. Callers verify the keys against the userID, pin them, and warn if they ever change.
-  router.get("/users/:userID/pubkeys", requireSignedRequest(deps), async (req, res) => {
+  router.get(
+    "/users/:userID/pubkeys",
+    requireSignedRequest(deps),
+    limitByCaller((l) => l.keyLookup, deps),
+    async (req, res) => {
     const userId = req.params.userID;
     if (typeof userId !== "string" || !USER_ID_PATTERN.test(userId)) {
       res.status(404).json({ error: "not_found" });
@@ -33,7 +38,8 @@ export function usersRouter(deps: AuthDeps): Router {
       // The identity key's signature over the exchange key; callers verify it.
       exchange_sig: row.exchange_sig.toString("base64"),
     });
-  });
+    },
+  );
 
   return router;
 }

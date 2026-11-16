@@ -18,6 +18,8 @@ class FakeServer {
   acked: string[] = [];
   failSend = false;
   failAck = false;
+  pageSize = 100;
+  inboxFetches = 0;
   private nextId = 1;
 
   register(who: StoredIdentity): void {
@@ -34,6 +36,7 @@ class FakeServer {
       nonce: envelope.nonce,
       ciphertext: envelope.ciphertext,
       createdAt: new Date(NOW).toISOString(),
+      cursor: `${this.nextId}_${messageId}`,
     });
     return messageId;
   }
@@ -55,7 +58,14 @@ class FakeServer {
         if (this.failSend) throw new ApiError(0, "network_error");
         return { messageId: this.deliver(me.userId, envelope) };
       },
-      fetchInbox: async (me) => [...this.inboxes.get(me.userId)!],
+      fetchInbox: async (me, after) => {
+        this.inboxFetches += 1;
+        // Pages, like the real server: the items after the cursor, a few at a time.
+        const inbox = this.inboxes.get(me.userId)!;
+        const position = (item: InboxItem) => Number(item.cursor.split("_")[0]);
+        const from = after === undefined ? -1 : Number(after.split("_")[0]);
+        return inbox.filter((item) => position(item) > from).slice(0, this.pageSize);
+      },
       ackMessage: async (me, messageId) => {
         if (this.failAck) throw new ApiError(0, "network_error");
         this.acked.push(messageId);
@@ -362,5 +372,61 @@ describe("receiving", () => {
     const [a, b] = await Promise.all([bobReceives(), bobReceives()]);
     expect(a.stored + b.stored).toBe(1);
     expect(await bobHistory()).toEqual(["once"]);
+  });
+});
+
+describe("paging through the inbox", () => {
+  it("collects every waiting message, however many pages it takes", async () => {
+    server.pageSize = 2;
+    for (let i = 1; i <= 7; i++) await aliceSends(`message ${i}`);
+    expect(await bobReceives()).toMatchObject({ stored: 7, dropped: 0 });
+    expect(await bobHistory()).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `message ${i}`));
+    expect(bobInbox()).toHaveLength(0);
+  });
+
+  it("is not held up by a page full of messages it has to leave on the server", async () => {
+    server.pageSize = 2;
+    const stranger = createIdentity(NOW);
+    server.register(stranger);
+    for (let i = 0; i < 5; i++) {
+      server.deliver(
+        stranger.userId,
+        encryptMessage({
+          message: { counter: i + 1, text: "from a stranger", sentAt: NOW },
+          fromUserId: stranger.userId,
+          toUserId: bob.userId,
+          myExchangePrivateKey: stranger.exchangePrivateKey,
+          theirExchangePublicKey: bob.exchangePublicKey,
+        }),
+      );
+    }
+    await aliceSends("this must still arrive");
+
+    expect(await bobReceives()).toMatchObject({ stored: 1, unknownSenders: [stranger.userId] });
+    expect(await bobHistory()).toEqual(["this must still arrive"]);
+    // The stranger's messages are still waiting.
+    expect(bobInbox()).toHaveLength(5);
+  });
+
+  it("stops after a bounded number of pages if a server never runs out", async () => {
+    const endless: ApiClient = {
+      ...client,
+      fetchInbox: async () => {
+        server.inboxFetches += 1;
+        return [
+          {
+            messageId: "00000000-0000-4000-8000-000000000001",
+            from: createIdentity(NOW).userId,
+            nonce: crypto.toBase64(crypto.randomBytes(24)),
+            ciphertext: crypto.toBase64(crypto.randomBytes(32)),
+            createdAt: new Date(NOW).toISOString(),
+            cursor: "1_00000000-0000-4000-8000-000000000001",
+          },
+        ];
+      },
+    };
+    const result = await receiveMessages({ db: bobDb, client: endless, me: bob });
+    expect(result.stored).toBe(0);
+    expect(server.inboxFetches).toBe(200);
   });
 });

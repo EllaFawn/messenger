@@ -3,6 +3,7 @@ import { verifyRequest } from "@messager/protocol";
 import type { Request, RequestHandler, Response } from "express";
 import { getRawBody } from "../raw-body.js";
 import type { Pool } from "../db/pool.js";
+import type { LimitDeps } from "../limits.js";
 import { consumeNonce } from "./nonce-store.js";
 
 /** A request is accepted only if its timestamp is within this many ms of the server clock. */
@@ -25,7 +26,7 @@ export interface SignedHeaders {
   signature: Uint8Array;
 }
 
-export interface AuthDeps {
+export interface AuthDeps extends LimitDeps {
   pool: Pool;
   /** Clock in unix ms; injectable for tests. */
   now?: () => number;
