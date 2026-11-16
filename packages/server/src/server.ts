@@ -12,6 +12,8 @@ export interface StartServerOptions {
   /** 0 picks a free port. */
   port: number;
   sweepIntervalMs?: number;
+  /** Folder holding the built web app, to serve it from this same server. */
+  webDir?: string | null;
 }
 
 export interface RunningServer {
@@ -45,6 +47,7 @@ export async function startServer(options: StartServerOptions): Promise<RunningS
     pool: options.pool,
     inviteCode: options.inviteCode,
     onMessageStored: push.notify,
+    webDir: options.webDir ?? undefined,
   });
 
   const server: Server = await new Promise((resolve, reject) => {

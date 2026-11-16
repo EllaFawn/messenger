@@ -100,5 +100,22 @@ to compare out of band and a conversation. New messages arrive at once over a
 WebSocket; a slower periodic check covers the case where that connection is down. To try it alone, use a normal window and a
 private window as two separate users.
 
-`npm run build -w @messager/web` produces the production bundle in
-`packages/web/dist`.
+## Running it as one server
+
+The dev server above is for working on the code. To run the app the way it
+would be deployed - one server, with strict security headers - build the
+web app and let the server serve it:
+
+```
+npm run build -w @messager/web
+SERVE_WEB=1 npm run start -w @messager/server     # http://127.0.0.1:3000
+```
+
+(or set `SERVE_WEB=1` in `.env`). Every response carries a Content Security
+Policy that only allows scripts from the server itself: no inline script, no
+`eval`, no third-party origins, no framing. The dev server cannot apply this
+policy, because its live-reload relies on inline scripts.
+
+This is still plain HTTP on your own machine. HTTPS, and the
+`Strict-Transport-Security` header that goes with it, belong to the
+deployment work in M2.
