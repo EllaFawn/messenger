@@ -10,6 +10,7 @@ const exclude = ["**/node_modules/**", "**/dist/**"];
 const alias = {
   "@messager/crypto": fileURLToPath(new URL("./packages/crypto/src/index.ts", import.meta.url)),
   "@messager/protocol": fileURLToPath(new URL("./packages/protocol/src/index.ts", import.meta.url)),
+  "@messager/ratchet": fileURLToPath(new URL("./packages/ratchet/src/index.ts", import.meta.url)),
 };
 
 function project(name: string) {
@@ -24,6 +25,7 @@ export default defineConfig({
     projects: [
       project("crypto"),
       project("protocol"),
+      project("ratchet"),
       project("server"),
       project("web"),
       // Real web-client code against the real server; see e2e/client-server.test.ts.

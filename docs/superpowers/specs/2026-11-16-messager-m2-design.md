@@ -130,27 +130,30 @@ Checked against the npm registry on 2026-11-16:
 
 | Option | Finding | Verdict |
 |---|---|---|
-| **vodozemac** (Rust, Matrix's current implementation of Olm) | No standalone npm package. Would be compiled to WebAssembly through a small wrapper we own. | **Recommended**, subject to the spike below |
-| `@matrix-org/olm` 3.2.15 (libolm, C compiled to WebAssembly) | Published, Apache-2.0, 650 KB, runs in browsers. The older implementation that vodozemac replaced. | Fallback |
+| **vodozemac** (Rust, Matrix's current implementation of Olm) | No standalone npm package. Compiled to WebAssembly through a small wrapper we own. | **Chosen** (see 5.3) |
+| `@matrix-org/olm` 3.2.15 (libolm, C compiled to WebAssembly) | Published, Apache-2.0, 650 KB, runs in browsers. Officially deprecated since August 2024. | Rejected |
 | `@matrix-org/matrix-sdk-crypto-wasm` 19.0.1 | Contains vodozemac, but wrapped in Matrix's whole device and room model. 9 MB. | Rejected: wrong shape |
 | `@signalapp/libsignal-client` | Node-native, no browser build; AGPL-3.0. | Rejected |
 | `2key-ratchet`, `@privacyresearch/libsignal-protocol-typescript` | Last published 2022 and 2025; no audit found. | Rejected |
 | Writing our own | — | Rejected (decision above) |
 
-To confirm during the spike, from primary sources, before the choice is final: the scope and date of vodozemac's independent audit, the maintenance status of libolm, and whether vodozemac's WebAssembly build has known caveats.
-
 The wrapper would be a new package, `packages/ratchet`, exposing only what we use: create account, export public keys, generate and mark one-time keys, create outbound and inbound sessions, encrypt, decrypt, and serialise state. All cryptographic logic stays inside the library.
 
-### 5.3 Spike first (time-boxed, before any design is final)
+### 5.3 Trial results (2026-11-16)
 
-A throwaway branch that answers:
+The trial was run on a throwaway branch and answered the open questions.
 
-1. Does the chosen library build and run in a browser under our Content Security Policy? (`'wasm-unsafe-eval'` is already allowed.)
-2. Can account and session state be saved to IndexedDB and restored?
-3. What does it add to the bundle size and to CI (a Rust toolchain, if vodozemac)?
-4. Can a second, independent run of the same test decrypt nothing from the first? (A sanity check that state is real.)
+- **Library: vodozemac 0.11.2**, compiled to WebAssembly through a wrapper of about 250 lines with no cryptography of its own (`packages/ratchet`). Its README states one audit by Least Authority with no significant findings. The fallback is ruled out: Matrix deprecated libolm in August 2024 and says it should not be used going forward.
+- **Works in browsers under our Content Security Policy** with no change to the policy; confirmed by hand in two browsers.
+- **State saves to and restores from IndexedDB** as encrypted text.
+- **Cost:** 317 KB added to the download (about 120 KB compressed), roughly 0.1 ms per message, about 60 bytes of overhead per message.
+- **Build:** inside Docker, no Rust on developer machines. It is reproducible, so the compiled file is committed and CI rebuilds it and compares.
+- **Session version 1** (8-byte authentication tag) is used: it is the library's default and the audited configuration. The full-length variant is marked experimental upstream.
 
-If vodozemac fails any of 1–3, fall back to `@matrix-org/olm` and repeat. The rest of this section is written to fit either.
+Interface details that differ from what section 5.6 assumed:
+
+- A sender keeps sending pre-key messages until they receive a reply. The recipient must route a repeat to the session it already created (by the session id carried in the message) and only create a session when none matches.
+- There is one **fallback key** per account alongside the one-time keys, as section 5.5 anticipated.
 
 ### 5.4 Keys
 
@@ -333,4 +336,4 @@ P1 and P2 are small, independent, and needed before anything faces the internet.
 4. **Clean break at P3:** yes. Accounts and undelivered messages are wiped by the migration, as with migration 002.
 5. **On the VPS:** Docker Compose. See "Changing this later" in section 7 for what a move to a larger production setup would involve.
 
-Still to settle, inside P3: the ratchet library, decided by the spike in section 5.3.
+The ratchet library was settled by the trial; see section 5.3.

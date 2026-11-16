@@ -48,6 +48,15 @@ jobs:
 
       - run: npm ci
 
+      # The ratchet library is committed as a compiled WebAssembly file. Rebuild
+      # it from source and fail if it differs, so the binary is never something
+      # that has to be taken on trust.
+      - name: Check compiled ratchet library matches its source
+        run: |
+          sh packages/ratchet/build.sh
+          git diff --exit-code --stat -- packages/ratchet/wasm
+          test -z "$(git status --porcelain -- packages/ratchet/wasm)"
+
       - run: npm run typecheck
 
       - run: npm test

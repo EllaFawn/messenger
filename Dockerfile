@@ -9,6 +9,7 @@ WORKDIR /app
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY packages/crypto/package.json packages/crypto/
 COPY packages/protocol/package.json packages/protocol/
+COPY packages/ratchet/package.json packages/ratchet/
 COPY packages/server/package.json packages/server/
 COPY packages/web/package.json packages/web/
 RUN npm ci
