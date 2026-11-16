@@ -1,0 +1,3 @@
+# Compiled output of packages/ratchet/rust; see packages/ratchet/README.md.
+packages/ratchet/wasm/*.wasm binary
+packages/ratchet/wasm/* linguist-generated=true

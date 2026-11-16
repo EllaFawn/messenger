@@ -16,6 +16,9 @@ npm workspaces monorepo:
 - `packages/crypto` — keygen, ECDH, HKDF, AEAD, hashing. Headless, isomorphic.
 - `packages/protocol` — wire types, userID derivation, canonical request
   string, envelope encode/decode. Shared by client and server.
+- `packages/ratchet` — forward-secret sessions (Double Ratchet), a thin
+  wrapper around the audited vodozemac library compiled to WebAssembly. Not
+  used by the app yet. See its README.
 - `packages/server` — Express + Postgres relay.
 - `packages/web` — React + Vite client.
 - `e2e` — tests that run the real web-client code against the real server

@@ -12,3 +12,5 @@ docs
 e2e
 backups
 *.md
+packages/ratchet/rust
+packages/ratchet/.tools
