@@ -21,6 +21,13 @@ function project(name: string) {
 
 export default defineConfig({
   test: {
-    projects: [project("crypto"), project("protocol"), project("server"), project("web")],
+    projects: [
+      project("crypto"),
+      project("protocol"),
+      project("server"),
+      project("web"),
+      // Real web-client code against the real server; see e2e/client-server.test.ts.
+      { resolve: { alias }, test: { name: "e2e", root: "./e2e", exclude } },
+    ],
   },
 });
