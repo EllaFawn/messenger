@@ -208,6 +208,7 @@ interface InboxItem {
   nonce: string;
   ciphertext: string;
   created_at: string;
+  cursor: string;
 }
 
 async function inbox(who: TestIdentity): Promise<InboxItem[]> {
@@ -245,6 +246,7 @@ describe("GET /messages/inbox", () => {
         nonce: envelope.nonce,
         ciphertext: envelope.ciphertext,
         created_at: sent.created_at,
+        cursor: expect.stringMatching(/^\d+_/),
       },
     ]);
   });

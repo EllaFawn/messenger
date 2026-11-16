@@ -3,7 +3,7 @@ import express, { type ErrorRequestHandler, type Express } from "express";
 import type { Pool } from "./db/pool.js";
 import { guardFailedAuth, type LimitDeps } from "./limits.js";
 import { getRawBody, rememberRawBody } from "./raw-body.js";
-import { messagesRouter } from "./routes/messages.js";
+import { messagesRouter, type QueueLimits } from "./routes/messages.js";
 import { registerRouter } from "./routes/register.js";
 import { usersRouter } from "./routes/users.js";
 
@@ -41,6 +41,8 @@ export interface AppDeps extends LimitDeps {
   onMessageStored?: (toUserId: string) => void;
   /** Folder holding the built web app. If set, the server serves it alongside the API. */
   webDir?: string;
+  queueLimits?: QueueLimits;
+  inboxPageSize?: number;
 }
 
 /** Removes the /api prefix from a request path, or returns null if it has none. */

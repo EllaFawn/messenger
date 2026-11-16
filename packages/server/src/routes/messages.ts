@@ -57,13 +57,55 @@ function parseEnvelope(body: unknown): IncomingEnvelope | null {
   return { to, nonce: nonceBytes, ciphertext: ciphertextBytes };
 }
 
+/** How many undelivered messages the server will hold. */
+export interface QueueLimits {
+  /** From one sender to one recipient. */
+  perPair: number;
+  /** For one recipient, from everyone. */
+  perRecipient: number;
+}
+
+export const DEFAULT_QUEUE_LIMITS: QueueLimits = { perPair: 500, perRecipient: 5000 };
+
+/** An undelivered message is deleted after this long. */
+export const MESSAGE_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Deletes messages nobody collected in time. Returns how many were removed. */
+export async function sweepExpiredMessages(
+  pool: AuthDeps["pool"],
+  now: Date,
+  maxAgeMs: number = MESSAGE_MAX_AGE_MS,
+): Promise<number> {
+  const result = await pool.query("DELETE FROM messages WHERE created_at < $1", [
+    new Date(now.getTime() - maxAgeMs),
+  ]);
+  return result.rowCount ?? 0;
+}
+
+/**
+ * A position in an inbox: the message's creation time in microseconds, then
+ * its id. Opaque to clients, which only ever hand back one they were given.
+ */
+const CURSOR_PATTERN = /^(\d{1,18})_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+
+function parseCursor(value: unknown): { micros: string; messageId: string } | null {
+  if (typeof value !== "string") return null;
+  const match = CURSOR_PATTERN.exec(value);
+  return match === null ? null : { micros: match[1]!, messageId: match[2]! };
+}
+
 export interface MessagesDeps extends AuthDeps {
+  queueLimits?: QueueLimits;
+  /** Messages per inbox page. Overridable for tests. */
+  inboxPageSize?: number;
   /** Called after a message is stored, with the recipient's userID, so they can be told at once. */
   onMessageStored?: (toUserId: string) => void;
 }
 
 export function messagesRouter(deps: MessagesDeps): Router {
   const router = Router();
+  const queueLimits = deps.queueLimits ?? DEFAULT_QUEUE_LIMITS;
+  const pageSize = deps.inboxPageSize ?? INBOX_PAGE_SIZE;
 
   router.post("/messages", requireSignedRequest(deps), limitByCaller((l) => l.sendMessage, deps), async (req, res) => {
     const envelope = parseEnvelope(req.body);
@@ -75,16 +117,26 @@ export function messagesRouter(deps: MessagesDeps): Router {
     // The sender is whoever signed the request; a "from" in the body is never read.
     const from = authenticatedUserId(res);
 
+    // The queue checks are part of the insert. Two simultaneous sends can
+    // both pass and overshoot by one; the limits are a bound on abuse, not
+    // an exact quota.
     const inserted = await deps.pool.query<{ message_id: string; created_at: Date }>(
       `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext)
        SELECT $1, $2, $3, $4
        WHERE EXISTS (SELECT 1 FROM users WHERE user_id = $2)
+         AND (SELECT count(*) FROM messages WHERE to_user_id = $2 AND from_user_id = $1) < $5
+         AND (SELECT count(*) FROM messages WHERE to_user_id = $2) < $6
        RETURNING message_id, created_at`,
-      [from, envelope.to, envelope.nonce, envelope.ciphertext],
+      [from, envelope.to, envelope.nonce, envelope.ciphertext, queueLimits.perPair, queueLimits.perRecipient],
     );
     const row = inserted.rows[0];
     if (row === undefined) {
-      res.status(404).json({ error: "recipient_not_found" });
+      const recipient = await deps.pool.query("SELECT 1 FROM users WHERE user_id = $1", [envelope.to]);
+      if (recipient.rowCount === 0) {
+        res.status(404).json({ error: "recipient_not_found" });
+      } else {
+        res.status(429).json({ error: "recipient_queue_full" });
+      }
       return;
     }
 
@@ -102,8 +154,20 @@ export function messagesRouter(deps: MessagesDeps): Router {
   // A message keeps coming back until it is acked, so a client that crashes
   // between fetching and saving does not lose it; the client's counter check
   // discards repeats. delivered_at only records the first fetch.
-  router.get("/messages/inbox", requireSignedRequest(deps), limitByCaller((l) => l.signed, deps), async (_req, res) => {
+  //
+  // One page per request. `?after=<cursor>` continues from an earlier item,
+  // so a client can step past messages it has chosen to leave here.
+  router.get("/messages/inbox", requireSignedRequest(deps), limitByCaller((l) => l.signed, deps), async (req, res) => {
     const caller = authenticatedUserId(res);
+
+    let after: { micros: string; messageId: string } | null = null;
+    if (req.query.after !== undefined) {
+      after = parseCursor(req.query.after);
+      if (after === null) {
+        res.status(400).json({ error: "invalid_request" });
+        return;
+      }
+    }
 
     const result = await deps.pool.query<{
       message_id: string;
@@ -111,20 +175,24 @@ export function messagesRouter(deps: MessagesDeps): Router {
       nonce: Buffer;
       ciphertext: Buffer;
       created_at: Date;
+      micros: string;
     }>(
       `WITH page AS (
          SELECT message_id FROM messages
          WHERE to_user_id = $1
+           AND ($3::bigint IS NULL OR (created_at, message_id) >
+                ('epoch'::timestamptz + $3::bigint * interval '1 microsecond', $4::uuid))
          ORDER BY created_at, message_id
          LIMIT $2
        ), marked AS (
          UPDATE messages SET delivered_at = now()
          WHERE message_id IN (SELECT message_id FROM page) AND delivered_at IS NULL
        )
-       SELECT m.message_id, m.from_user_id, m.nonce, m.ciphertext, m.created_at
+       SELECT m.message_id, m.from_user_id, m.nonce, m.ciphertext, m.created_at,
+              (extract(epoch FROM m.created_at) * 1000000)::bigint::text AS micros
        FROM messages m JOIN page USING (message_id)
        ORDER BY m.created_at, m.message_id`,
-      [caller, INBOX_PAGE_SIZE],
+      [caller, pageSize, after?.micros ?? null, after?.messageId ?? null],
     );
 
     res.json(
@@ -135,6 +203,7 @@ export function messagesRouter(deps: MessagesDeps): Router {
         nonce: row.nonce.toString("base64"),
         ciphertext: row.ciphertext.toString("base64"),
         created_at: row.created_at.toISOString(),
+        cursor: `${row.micros}_${row.message_id}`,
       })),
     );
   });
