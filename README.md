@@ -18,6 +18,8 @@ npm workspaces monorepo:
   string, envelope encode/decode. Shared by client and server.
 - `packages/server` — Express + Postgres relay.
 - `packages/web` — React + Vite client.
+- `e2e` — tests that run the real web-client code against the real server
+  and database. The only place that imports both.
 
 ## Dev setup
 

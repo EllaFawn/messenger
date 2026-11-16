@@ -7,9 +7,11 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "typecheck": "tsc -b"
+    "typecheck": "tsc -b && tsc -p e2e/tsconfig.json"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
+    "fake-indexeddb": "^6.2.8",
     "typescript": "^5.9.3",
     "vitest": "^5.1.0"
   }
