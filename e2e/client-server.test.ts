@@ -20,7 +20,13 @@ import { receiveMessages, sendChatMessage } from "../packages/web/src/chat.js";
 import { addContact, canSendTo, refreshContactKeys } from "../packages/web/src/contacts.js";
 import type { StoredIdentity } from "../packages/web/src/identity.js";
 import { connectPush } from "../packages/web/src/push.js";
-import { isRejectedByServer, loadSession, registerAgain, signUp } from "../packages/web/src/session.js";
+import {
+  describeError,
+  isRejectedByServer,
+  loadSession,
+  registerAgain,
+  signUp,
+} from "../packages/web/src/session.js";
 import { getContact } from "../packages/web/src/storage/contact-store.js";
 import { openDatabase } from "../packages/web/src/storage/db.js";
 import { listMessages } from "../packages/web/src/storage/message-store.js";
@@ -163,6 +169,43 @@ describe("two people, end to end", () => {
     await addContact({ db: bob.storage, client, me: bob.me, userId: alice.me.userId });
     expect((await check(bob)).stored).toBe(1);
     expect(await conversation(bob, alice)).toEqual(["in:you don't know me yet"]);
+  });
+});
+
+describe("limits", () => {
+  it("delivers a message that sits behind more than a full page of messages from a stranger", async () => {
+    const alice = await newBrowser();
+    const bob = await newBrowser();
+    const stranger = await newBrowser();
+    await befriend(alice, bob);
+    // 120 undelivered messages for Bob from someone he has not added: more than one inbox page.
+    await db.pool.query(
+      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
+       SELECT $1, $2, $3, $4, now() - interval '1 hour' + n * interval '1 millisecond'
+       FROM generate_series(1, 120) AS n`,
+      [stranger.me.userId, bob.me.userId, Buffer.alloc(24), Buffer.alloc(32)],
+    );
+    await say(alice, bob, "behind the queue");
+
+    expect(await check(bob)).toMatchObject({ stored: 1, unknownSenders: [stranger.me.userId] });
+    expect(await conversation(bob, alice)).toEqual(["in:behind the queue"]);
+    expect(await serverCount("messages")).toBe(120);
+  });
+
+  it("slows down a sender who floods, and tells the client how to describe it", async () => {
+    const alice = await newBrowser();
+    const bob = await newBrowser();
+    await befriend(alice, bob);
+
+    let refusal: unknown;
+    for (let i = 0; i < 70 && refusal === undefined; i++) {
+      await say(alice, bob, `flood ${i}`).catch((error: unknown) => (refusal = error));
+    }
+    expect((refusal as ApiError).status).toBe(429);
+    expect((refusal as ApiError).code).toBe("rate_limited");
+    expect(describeError(refusal)).toMatch(/too many requests/i);
+    // The default limit is 60 a minute.
+    expect(await serverCount("messages")).toBe(60);
   });
 });
 

@@ -139,6 +139,8 @@ describe("describeError", () => {
     ["network_error", /reach the server/i],
     ["unauthorized", /does not recognise this identity.*clock/is],
     ["not_found", /no user with that ID/i],
+    ["rate_limited", /too many requests/i],
+    ["recipient_queue_full", /too many unread messages/i],
   ])("explains %s in plain words", (code, pattern) => {
     expect(describeError(new ApiError(400, code))).toMatch(pattern);
   });

@@ -49,6 +49,8 @@ export interface InboxItem {
   ciphertext: string;
   /** ISO time the server stored it. */
   createdAt: string;
+  /** Opaque position in the inbox; pass the last one back to fetch the next page. */
+  cursor: string;
 }
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -59,12 +61,13 @@ const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/
 /** Guards against a server sending an absurdly large inbox entry. */
 const MAX_CIPHERTEXT_CHARS = 64 * 1024;
 const MAX_INBOX_ITEMS = 1000;
+const CURSOR_PATTERN = /^\d{1,18}_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function parseInboxItem(value: unknown): InboxItem | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
-  const { message_id, from, v, nonce, ciphertext, created_at } = value as Record<string, unknown>;
+  const { message_id, from, v, nonce, ciphertext, created_at, cursor } = value as Record<string, unknown>;
   if (
     v !== 1 ||
     typeof message_id !== "string" ||
@@ -72,6 +75,8 @@ function parseInboxItem(value: unknown): InboxItem | null {
     typeof nonce !== "string" ||
     typeof ciphertext !== "string" ||
     typeof created_at !== "string" ||
+    typeof cursor !== "string" ||
+    !CURSOR_PATTERN.test(cursor) ||
     !UUID_PATTERN.test(message_id) ||
     !USER_ID_PATTERN.test(from) ||
     !MESSAGE_NONCE_PATTERN.test(nonce) ||
@@ -82,7 +87,7 @@ function parseInboxItem(value: unknown): InboxItem | null {
   ) {
     return null;
   }
-  return { messageId: message_id, from, nonce, ciphertext, createdAt: created_at };
+  return { messageId: message_id, from, nonce, ciphertext, createdAt: created_at, cursor };
 }
 
 /** Standard base64 of exactly 32 bytes. */
@@ -108,8 +113,12 @@ export interface ApiClient {
   getPubkeys(identity: StoredIdentity, userId: string): Promise<PublicKeys>;
   /** Hands an already-encrypted envelope to the server for delivery. */
   sendMessage(identity: StoredIdentity, envelope: Envelope): Promise<{ messageId: string }>;
-  /** Messages waiting for this user, oldest first. They stay on the server until acknowledged. */
-  fetchInbox(identity: StoredIdentity): Promise<InboxItem[]>;
+  /**
+   * One page of the messages waiting for this user, oldest first. They stay
+   * on the server until acknowledged. Pass the last item's cursor as `after`
+   * for the next page; an empty page means the end.
+   */
+  fetchInbox(identity: StoredIdentity, after?: string): Promise<InboxItem[]>;
   /** Tells the server a message is safely stored here, so it can delete its copy. */
   ackMessage(identity: StoredIdentity, messageId: string): Promise<void>;
 }
@@ -244,8 +253,13 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     return { messageId };
   }
 
-  async function fetchInbox(identity: StoredIdentity): Promise<InboxItem[]> {
-    const result = await request(identity, "GET", "/messages/inbox");
+  async function fetchInbox(identity: StoredIdentity, after?: string): Promise<InboxItem[]> {
+    if (after !== undefined && !CURSOR_PATTERN.test(after)) {
+      throw new ApiError(0, "invalid_request");
+    }
+    // The query string is part of the signed path.
+    const path = after === undefined ? "/messages/inbox" : `/messages/inbox?after=${after}`;
+    const result = await request(identity, "GET", path);
     if (!Array.isArray(result) || result.length > MAX_INBOX_ITEMS) {
       throw new ApiError(200, "invalid_response");
     }

@@ -114,6 +114,10 @@ export function describeError(error: unknown): string {
         return "Could not reach the server. Check it is running and try again.";
       case "unauthorized":
         return "The server rejected the request. Either it does not recognise this identity, or this device's clock is wrong.";
+      case "rate_limited":
+        return "Too many requests. Wait a moment and try again.";
+      case "recipient_queue_full":
+        return "This contact has too many unread messages waiting. Try again once they have been online.";
       case "not_found":
         return "The server has no user with that ID.";
       default:
