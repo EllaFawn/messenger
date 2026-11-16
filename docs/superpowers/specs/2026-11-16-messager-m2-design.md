@@ -246,6 +246,8 @@ Step 3 needs a new route, `PUT /keys/ratchet`, and relaxes M1's rule that regist
 
 ## 7. P5 — Deployment and hardening
 
+Status: built (`chore/deploy`); see `docs/deploy.md`. As built: backups are encrypted with `age` to a public key whose private half stays off the server; Caddy keeps no access log at all rather than a filtered one; images are pinned by digest but the app image does not yet run from a published registry (it is built on the server from a tag). Releases and Dependabot are not set up yet.
+
 **Shape:** one small VPS running Docker Compose with three containers.
 
 ```

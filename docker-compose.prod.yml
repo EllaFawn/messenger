@@ -1,0 +1,86 @@
+# Production stack: Caddy (HTTPS) -> app (web + API + WebSocket) -> Postgres.
+# Only Caddy is reachable from outside. See docs/deploy.md.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# docker-compose.yml (no suffix) is the development database and is unrelated.
+name: messager
+
+services:
+  caddy:
+    image: caddy:2.11.9@sha256:4e2425f6009577e7c651010f16679c28f7d12df3e7b1914f941a7a3370746b3c
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      DOMAIN: ${DOMAIN:?Set DOMAIN in .env.prod, e.g. chat.example.org}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+    networks: [edge]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    security_opt: ["no-new-privileges:true"]
+
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    environment:
+      DATABASE_URL: postgres://messager:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}@postgres:5432/messager
+      # Listens on every interface inside the container; nothing outside the Docker networks can reach it.
+      HOST: 0.0.0.0
+      PORT: 3000
+      SERVE_WEB: 1
+      # Exactly one proxy (Caddy) is in front.
+      TRUST_PROXY: 1
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    networks: [edge, data]
+    # Runs as an unprivileged user, cannot gain privileges, and cannot write to its own filesystem.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+  postgres:
+    image: postgres:16@sha256:dd2bf3ce2dc83a81674cf7f217fcfd8a5009a4b325dda5b843bfee82a06cff6f
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: messager
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.prod}
+      POSTGRES_DB: messager
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U messager -d messager"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No ports: published. Reachable only by the app.
+    networks: [data]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  # Caddy <-> app.
+  edge:
+  # app <-> Postgres. "internal" means no route to or from the outside world.
+  data:
+    internal: true
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

@@ -101,6 +101,12 @@ Routes so far:
 Signed requests carry `X-User-ID`, `X-Timestamp`, `X-Nonce` and
 `X-Signature`; see design section 4.
 
+## Deploying
+
+[docs/deploy.md](docs/deploy.md) covers running this on a server: the
+production Docker Compose stack (Caddy for HTTPS, the app, Postgres),
+securing the server, updating, and encrypted backups.
+
 ## Limits
 
 A running server always applies these. Refusals are `429` with a
@@ -161,6 +167,5 @@ Policy that only allows scripts from the server itself: no inline script, no
 `eval`, no third-party origins, no framing. The dev server cannot apply this
 policy, because its live-reload relies on inline scripts.
 
-This is still plain HTTP on your own machine. HTTPS, and the
-`Strict-Transport-Security` header that goes with it, belong to the
-deployment work in M2.
+This is still plain HTTP on your own machine. The production stack in
+[docs/deploy.md](docs/deploy.md) adds HTTPS and `Strict-Transport-Security`.
