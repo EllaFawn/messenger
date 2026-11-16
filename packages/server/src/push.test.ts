@@ -3,6 +3,7 @@ import { encodeEnvelope } from "@messager/protocol";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { migrate } from "./db/migrate.js";
 import { createTestDatabase, type TestDatabase } from "./db/test-db.js";
+import { DEFAULT_RATE_LIMITS, type RateLimits } from "./limits.js";
 import { MAX_PUSH_CONNECTIONS_PER_USER } from "./push.js";
 import { startServer, type RunningServer } from "./server.js";
 import { insertUser, makeIdentity, signedFetch, signedWsUrl, type TestIdentity } from "./test-client.js";
@@ -251,5 +252,61 @@ describe("push connection authentication", () => {
   it("leaves ordinary requests working", async () => {
     await open(bob);
     expect((await fetch(server.url + "/health")).status).toBe(200);
+  });
+});
+
+describe("push connection limits", () => {
+  // Each test starts its own server with small limits, in place of the shared one.
+  async function restart(options: Parameters<typeof startServer>[0]): Promise<void> {
+    await server.close();
+    server = await startServer(options);
+  }
+  const base = () => ({ pool: db.pool, host: "127.0.0.1", port: 0 });
+  const MINUTE = 60_000;
+  const limitsWith = (overrides: Partial<RateLimits>): RateLimits => ({ ...DEFAULT_RATE_LIMITS, ...overrides });
+
+  it("limits how fast one address can open connections", async () => {
+    await restart({ ...base(), rateLimits: limitsWith({ wsUpgrade: { limit: 2, windowMs: MINUTE } }) });
+    await open(bob);
+    await open(bob);
+    expect((await connect(signedWsUrl(server.url, bob))).opened).toBe(false);
+    expect(server.pushConnectionCount()).toBe(2);
+  });
+
+  it("counts failed connection attempts and then refuses the address, even with a valid signature", async () => {
+    await restart({ ...base(), rateLimits: limitsWith({ failedAuth: { limit: 2, windowMs: MINUTE } }) });
+    const unsigned = `${server.url.replace(/^http/, "ws")}/ws`;
+    await connect(unsigned);
+    await connect(unsigned);
+    expect((await connect(signedWsUrl(server.url, bob))).opened).toBe(false);
+    // The same address is now refused over HTTP as well.
+    expect((await fetch(server.url + "/health")).status).toBe(429);
+  });
+
+  it("limits how many connections one address can hold open", async () => {
+    await restart({ ...base(), push: { maxPerIp: 2 } });
+    await open(alice);
+    const second = await open(bob);
+    expect((await connect(signedWsUrl(server.url, alice))).opened).toBe(false);
+
+    // Closing one frees a place.
+    second.close();
+    await waitFor(() => server.pushConnectionCount() === 1, "the connection to be forgotten");
+    await open(bob);
+  });
+
+  it("limits the total number of connections", async () => {
+    await restart({ ...base(), push: { maxTotal: 1 } });
+    await open(alice);
+    expect((await connect(signedWsUrl(server.url, bob))).opened).toBe(false);
+    expect(server.pushConnectionCount()).toBe(1);
+  });
+
+  it("does not store a nonce for a connection refused by a limit", async () => {
+    await restart({ ...base(), push: { maxTotal: 1 } });
+    await open(alice);
+    const before = (await db.pool.query("SELECT count(*)::int AS n FROM auth_nonces")).rows[0].n;
+    await connect(signedWsUrl(server.url, bob));
+    expect((await db.pool.query("SELECT count(*)::int AS n FROM auth_nonces")).rows[0].n).toBe(before);
   });
 });

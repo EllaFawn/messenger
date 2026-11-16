@@ -23,6 +23,8 @@ export interface ServerConfig extends Config {
   port: number;
   /** Folder of the built web app to serve, or null to serve the API only. */
   webDir: string | null;
+  /** How many reverse proxies in front of the server to believe for the client's address. */
+  trustedProxies: number;
 }
 
 /** Settings needed to run the HTTP server. Throws with a clear message if any is missing or invalid. */
@@ -50,9 +52,15 @@ export function loadServerConfig(
     webDir = builtWebDir;
   }
 
+  const rawProxies = env.TRUST_PROXY || "0";
+  if (!/^[0-5]$/.test(rawProxies)) {
+    throw new Error("TRUST_PROXY must be the number of reverse proxies in front of the server (0 to 5)");
+  }
+
   return {
     ...loadConfig(env),
     webDir,
+    trustedProxies: Number(rawProxies),
     host: env.HOST || "127.0.0.1",
     port,
   };

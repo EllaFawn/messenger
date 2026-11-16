@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { limitByCaller } from "../limits.js";
 import {
   authenticatedUserId,
   requireSignedRequest,
@@ -64,7 +65,7 @@ export interface MessagesDeps extends AuthDeps {
 export function messagesRouter(deps: MessagesDeps): Router {
   const router = Router();
 
-  router.post("/messages", requireSignedRequest(deps), async (req, res) => {
+  router.post("/messages", requireSignedRequest(deps), limitByCaller((l) => l.sendMessage, deps), async (req, res) => {
     const envelope = parseEnvelope(req.body);
     if (envelope === null) {
       res.status(400).json({ error: "invalid_request" });
@@ -101,7 +102,7 @@ export function messagesRouter(deps: MessagesDeps): Router {
   // A message keeps coming back until it is acked, so a client that crashes
   // between fetching and saving does not lose it; the client's counter check
   // discards repeats. delivered_at only records the first fetch.
-  router.get("/messages/inbox", requireSignedRequest(deps), async (_req, res) => {
+  router.get("/messages/inbox", requireSignedRequest(deps), limitByCaller((l) => l.signed, deps), async (_req, res) => {
     const caller = authenticatedUserId(res);
 
     const result = await deps.pool.query<{
@@ -141,7 +142,7 @@ export function messagesRouter(deps: MessagesDeps): Router {
   // Acknowledging deletes the row, so the server stops holding the ciphertext.
   // Only the recipient may do it. Someone else's message and a missing one get
   // the same 404, so the answer does not reveal whether an id exists.
-  router.post("/messages/:id/ack", requireSignedRequest(deps), async (req, res) => {
+  router.post("/messages/:id/ack", requireSignedRequest(deps), limitByCaller((l) => l.signed, deps), async (req, res) => {
     const messageId = req.params.id;
     if (typeof messageId !== "string" || !UUID_PATTERN.test(messageId)) {
       res.status(404).json({ error: "not_found" });

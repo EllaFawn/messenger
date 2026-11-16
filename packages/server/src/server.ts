@@ -3,7 +3,8 @@ import type { AddressInfo } from "node:net";
 import { createApp } from "./app.js";
 import { sweepExpiredNonces } from "./auth/nonce-store.js";
 import type { Pool } from "./db/pool.js";
-import { createPushHub } from "./push.js";
+import { createLimiters, DEFAULT_RATE_LIMITS, type RateLimits } from "./limits.js";
+import { createPushHub, type PushOptions } from "./push.js";
 
 export interface StartServerOptions {
   pool: Pool;
@@ -13,6 +14,11 @@ export interface StartServerOptions {
   sweepIntervalMs?: number;
   /** Folder holding the built web app, to serve it from this same server. */
   webDir?: string | null;
+  /** Overrides the default rate limits. */
+  rateLimits?: RateLimits;
+  /** How many reverse proxies in front of the server to believe for the client's address. Default 0. */
+  trustedProxies?: number;
+  push?: PushOptions;
 }
 
 export interface RunningServer {
@@ -41,9 +47,15 @@ export function startNonceSweeper(pool: Pool, intervalMs: number): () => void {
 }
 
 export async function startServer(options: StartServerOptions): Promise<RunningServer> {
-  const push = createPushHub({ pool: options.pool });
+  // A running server is always rate limited; only the bare app (used in tests) can be built without.
+  const limits = {
+    limiters: createLimiters(options.rateLimits ?? DEFAULT_RATE_LIMITS),
+    trustedProxies: options.trustedProxies ?? 0,
+  };
+  const push = createPushHub({ pool: options.pool, ...limits }, options.push);
   const app = createApp({
     pool: options.pool,
+    ...limits,
     onMessageStored: push.notify,
     webDir: options.webDir ?? undefined,
   });

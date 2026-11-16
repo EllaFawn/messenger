@@ -9,6 +9,7 @@ import {
   verifySignature,
   type AuthDeps,
 } from "../auth/signed-request.js";
+import { limitByIp } from "../limits.js";
 import { claimInvite, hashInviteCode, isInviteUsable } from "../invites.js";
 
 
@@ -52,7 +53,7 @@ function parseRegistrationBody(body: unknown): RegistrationBody | null {
 export function registerRouter(deps: AuthDeps): Router {
   const router = Router();
 
-  router.post("/register", async (req, res) => {
+  router.post("/register", limitByIp((l) => l.register, deps), async (req, res) => {
     const body = parseRegistrationBody(req.body);
     if (body === null) {
       res.status(400).json({ error: "invalid_request" });
