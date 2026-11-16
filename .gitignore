@@ -17,3 +17,7 @@ Thumbs.db
 # logs
 npm-debug.log*
 .tsbuild/
+
+# Production secrets and local backups
+.env.prod
+backups/

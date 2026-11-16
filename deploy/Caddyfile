@@ -1,0 +1,27 @@
+# Caddy terminates HTTPS and forwards everything to the app.
+#
+# For a real domain it obtains and renews certificates from Let's Encrypt
+# automatically. For "localhost" it issues a certificate from its own local
+# authority, which is what the laptop test and CI use.
+{
+	# No admin API: nothing needs to reconfigure Caddy while it runs.
+	admin off
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	header {
+		# Browsers that have visited once will refuse plain HTTP for a year.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# Forwards HTTP and WebSocket alike. Caddy replaces any X-Forwarded-For a
+	# client sends with the address it actually saw, which the app relies on
+	# (TRUST_PROXY=1) for per-address rate limits.
+	reverse_proxy app:3000
+
+	# No access log is configured on purpose: request lines would record who
+	# connected when, and the WebSocket URL carries a signature.
+}

@@ -70,3 +70,32 @@ jobs:
           grep -qi "^content-security-policy: default-src 'none'" headers.txt
           grep -q '<div id="root">' page.html
           curl --fail --silent --show-error http://127.0.0.1:3999/api/health
+
+      # The production stack (docker-compose.prod.yml): Caddy -> app -> Postgres,
+      # with Caddy issuing a local certificate for "localhost".
+      - name: Start production stack
+        run: |
+          printf 'DOMAIN=localhost\nPOSTGRES_PASSWORD=%s\n' "$(openssl rand -hex 24)" > .env.prod
+          docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build --wait --wait-timeout 180
+
+      - name: Check production stack
+        run: |
+          # HTTPS works end to end and carries both the app's and the proxy's security headers.
+          curl --fail --silent --show-error --insecure --retry 10 --retry-all-errors --retry-delay 2 \
+            --dump-header prod-headers.txt --output prod-page.html https://localhost/
+          grep -qi "^content-security-policy: default-src 'none'" prod-headers.txt
+          grep -qi "^strict-transport-security: max-age=31536000" prod-headers.txt
+          grep -q '<div id="root">' prod-page.html
+          curl --fail --silent --show-error --insecure https://localhost/api/health
+          # Plain HTTP is redirected to HTTPS.
+          test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost/)" = "308"
+          # The database is not published on the host by the production stack.
+          test -z "$(docker port "$(docker compose -f docker-compose.prod.yml --env-file .env.prod ps -q postgres)")"
+          # An operator command works inside the container.
+          docker compose -f docker-compose.prod.yml --env-file .env.prod exec -T app \
+            node packages/server/dist/cli/admin-cli.js invite list
+
+      - name: Production stack logs
+        if: failure()
+        run: docker compose -f docker-compose.prod.yml --env-file .env.prod logs --no-color --tail 100
+
