@@ -1,5 +1,14 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_DATABASE_URL, loadConfig, loadServerConfig, MIN_INVITE_CODE_LENGTH } from "./config.js";
+import {
+  DEFAULT_DATABASE_URL,
+  DEFAULT_WEB_DIR,
+  loadConfig,
+  loadServerConfig,
+  MIN_INVITE_CODE_LENGTH,
+} from "./config.js";
 
 const INVITE = "a-long-enough-invite-code-123";
 
@@ -20,6 +29,7 @@ describe("loadServerConfig", () => {
       inviteCode: INVITE,
       host: "127.0.0.1",
       port: 3000,
+      webDir: null,
     });
   });
 
@@ -50,5 +60,46 @@ describe("loadServerConfig", () => {
 
   it.each(["abc", "0", "70000", "-1", "3000.5", ""])("refuses an invalid PORT (%s)", (port) => {
     expect(() => loadServerConfig({ INVITE_CODE: INVITE, PORT: port })).toThrow(/PORT/);
+  });
+});
+
+describe("SERVE_WEB", () => {
+  function withBuiltWeb<T>(run: (dir: string) => T): T {
+    const dir = mkdtempSync(join(tmpdir(), "messager-web-"));
+    writeFileSync(join(dir, "index.html"), "<!doctype html>");
+    try {
+      return run(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("is off by default, so the server is API-only", () => {
+    expect(loadServerConfig({ INVITE_CODE: INVITE }).webDir).toBeNull();
+  });
+
+  it.each(["1", "true"])("serves the built web app when set to %s", (value) => {
+    withBuiltWeb((dir) => {
+      expect(loadServerConfig({ INVITE_CODE: INVITE, SERVE_WEB: value }, dir).webDir).toBe(dir);
+    });
+  });
+
+  it.each(["0", "false", ""])("stays off when set to %j", (value) => {
+    expect(loadServerConfig({ INVITE_CODE: INVITE, SERVE_WEB: value }).webDir).toBeNull();
+  });
+
+  it("refuses a value it does not understand", () => {
+    expect(() => loadServerConfig({ INVITE_CODE: INVITE, SERVE_WEB: "yes please" })).toThrow(/SERVE_WEB/);
+  });
+
+  it("refuses to start if the web app has not been built", () => {
+    const missing = join(tmpdir(), "messager-web-does-not-exist");
+    expect(() => loadServerConfig({ INVITE_CODE: INVITE, SERVE_WEB: "1" }, missing)).toThrow(
+      /npm run build -w @messager\/web/,
+    );
+  });
+
+  it("looks for the build in the web package by default", () => {
+    expect(DEFAULT_WEB_DIR.replaceAll("\\", "/")).toMatch(/packages\/web\/dist$/);
   });
 });

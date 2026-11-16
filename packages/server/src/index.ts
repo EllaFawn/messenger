@@ -15,6 +15,7 @@ await crypto.ready;
 const pool = createPool(config.databaseUrl);
 const server = await startServer({ ...config, pool });
 console.log(`Listening on ${server.url}`);
+console.log(config.webDir === null ? "Serving the API only" : "Serving the web app and the API");
 
 let stopping = false;
 async function shutdown(): Promise<void> {

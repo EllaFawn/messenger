@@ -105,7 +105,8 @@ export function createPushHub(deps: AuthDeps): PushHub {
       refuse(socket, 404);
       return;
     }
-    if (req.method !== "GET" || pathname !== PUSH_PATH) {
+    // The web app connects to /api/ws; both spellings name the same endpoint.
+    if (req.method !== "GET" || (pathname !== PUSH_PATH && pathname !== `/api${PUSH_PATH}`)) {
       refuse(socket, 404);
       return;
     }
