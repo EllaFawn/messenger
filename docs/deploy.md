@@ -14,8 +14,8 @@ Only Caddy is reachable from outside. The app and the database sit on
 internal Docker networks, and the database has no route to the internet at
 all.
 
-**Before inviting anyone:** the M2 design requires forward secrecy and
-identity backup to be finished first. Until then a deployment is for the
+**Before inviting anyone:** the M2 design requires identity backup to be
+finished first (forward secrecy is done). Until then a deployment is for the
 original two users' private testing only.
 
 ## 1. What you need

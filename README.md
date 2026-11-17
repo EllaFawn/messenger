@@ -2,9 +2,10 @@
 
 E2E encrypted 1:1 messaging, hobby prototype. Self-hosted, invite-only.
 
-> **Prototype. No security review performed. No forward secrecy — a single
-> key compromise exposes all past messages. Not for sensitive real-world
-> use.**
+> **Prototype. No security review performed. Not for sensitive real-world
+> use.** Messages use the Double Ratchet (forward secrecy), but message
+> history is stored unencrypted in the browser, and the server delivers the
+> page code, so a malicious server could still serve a page that leaks keys.
 
 See [`docs/superpowers/specs/2026-08-05-messager-mvp-design.md`](docs/superpowers/specs/2026-08-05-messager-mvp-design.md)
 for the full design and [`SPEC.md`](SPEC.md) for the original scope notes.
@@ -13,12 +14,13 @@ for the full design and [`SPEC.md`](SPEC.md) for the original scope notes.
 
 npm workspaces monorepo:
 
-- `packages/crypto` — keygen, ECDH, HKDF, AEAD, hashing. Headless, isomorphic.
+- `packages/crypto` — identity keys, signatures, hashing, encoding. Headless, isomorphic.
 - `packages/protocol` — wire types, userID derivation, canonical request
-  string, envelope encode/decode. Shared by client and server.
+  string, signed key statements, envelope encode/decode, safety numbers.
+  Shared by client and server.
 - `packages/ratchet` — forward-secret sessions (Double Ratchet), a thin
-  wrapper around the audited vodozemac library compiled to WebAssembly. Not
-  used by the app yet. See its README.
+  wrapper around the audited vodozemac library compiled to WebAssembly.
+  Used by the web client for every message. See its README.
 - `packages/server` — Express + Postgres relay.
 - `packages/web` — React + Vite client.
 - `e2e` — tests that run the real web-client code against the real server
@@ -94,9 +96,9 @@ Routes so far:
 | Route | Auth | Purpose |
 |---|---|---|
 | `GET /health` | none | Liveness check |
-| `POST /register` | signed by the key being registered + a single-use invite | Create an account |
-| `GET /users/:userID/pubkeys` | signed | Fetch a user's public keys, including the long-term ratchet key if set |
-| `POST /messages` | signed | Send an encrypted message (static-key v1 or ratchet v2); the sender is taken from the signature |
+| `POST /register` | signed by the key being registered + a single-use invite | Create an account with an identity key and a signed ratchet key |
+| `GET /users/:userID/pubkeys` | signed | Fetch a user's identity key and signed long-term ratchet key |
+| `POST /messages` | signed | Send a ratchet message (`{v: 2, to, type, ciphertext}`); the sender is taken from the signature |
 | `GET /messages/inbox` | signed | The caller's unacknowledged messages, oldest first, 100 per page (`?after=<cursor>` for the next) |
 | `POST /messages/:id/ack` | signed, recipient only | Confirm receipt; the server deletes the message |
 | `POST /keys/one-time` | signed | Upload signed one-time keys (up to 50 per request, 100 held) and optionally a fallback key |
