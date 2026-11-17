@@ -36,18 +36,15 @@ describe("002_exchange_key_signature", () => {
     );
 
     const result = await migrate(db.pool);
-    expect(result.applied).toEqual(["002_exchange_key_signature.sql", "003_invites.sql", "004_ratchet_keys.sql"]);
+    expect(result.applied).toEqual(["002_exchange_key_signature.sql", "003_invites.sql", "004_ratchet_keys.sql", "005_ratchet_only.sql"]);
 
     for (const table of ["users", "messages", "auth_nonces"]) {
       const rows = await db.pool.query(`SELECT count(*)::int AS n FROM ${table}`);
       expect(rows.rows[0].n).toBe(0);
     }
-    // No account can exist without a signature from now on.
+    // No account can exist without a signed key from now on (since 005, a signed ratchet key).
     await expect(
-      db.pool.query("INSERT INTO users (user_id, identity_pubkey, exchange_pubkey) VALUES ('new', $1, $2)", [
-        Buffer.alloc(32, 1),
-        Buffer.alloc(32, 2),
-      ]),
-    ).rejects.toThrow(/exchange_sig/);
+      db.pool.query("INSERT INTO users (user_id, identity_pubkey) VALUES ('new', $1)", [Buffer.alloc(32, 1)]),
+    ).rejects.toThrow(/ratchet_pubkey/);
   });
 });

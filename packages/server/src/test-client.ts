@@ -1,15 +1,12 @@
 import * as crypto from "@messager/crypto";
-import { deriveUserId, signExchangeKey, signOneTimeKey, signRatchetKey, signRequest } from "@messager/protocol";
+import { deriveUserId, signOneTimeKey, signRatchetKey, signRequest } from "@messager/protocol";
 import type { Pool } from "./db/pool.js";
 import { createInvite } from "./invites.js";
 
-/** A throwaway user for tests: both keypairs plus the derived userID. */
+/** A throwaway user for tests: the identity keypair, a ratchet key and the derived userID. */
 export interface TestIdentity {
   userId: string;
   identity: crypto.KeyPair;
-  exchange: crypto.KeyPair;
-  /** The identity key's signature over the exchange public key. */
-  exchangeSig: Uint8Array;
   /**
    * A stand-in long-term ratchet public key. The server never does ratchet
    * maths, so 32 random bytes with a valid signature are all it can tell apart.
@@ -43,32 +40,19 @@ export function oneTimeKeyJson(key: TestOneTimeKey): { id: string; key: string; 
 
 export function makeIdentity(): TestIdentity {
   const identity = crypto.generateIdentityKeyPair();
-  const exchange = crypto.generateExchangeKeyPair();
   const ratchetKey = crypto.randomBytes(32);
   return {
     ratchetKey,
     ratchetSig: signRatchetKey(ratchetKey, identity.privateKey),
     userId: deriveUserId(identity.publicKey),
     identity,
-    exchange,
-    exchangeSig: signExchangeKey(exchange.publicKey, identity.privateKey),
   };
 }
 
-/** Inserts a user. By default with a ratchet key; pass `ratchet: false` for an account that has none yet. */
-export async function insertUser(pool: Pool, who: TestIdentity, options: { ratchet?: boolean } = {}): Promise<void> {
-  const withRatchet = options.ratchet ?? true;
+export async function insertUser(pool: Pool, who: TestIdentity): Promise<void> {
   await pool.query(
-    `INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig, ratchet_pubkey, ratchet_sig)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [
-      who.userId,
-      Buffer.from(who.identity.publicKey),
-      Buffer.from(who.exchange.publicKey),
-      Buffer.from(who.exchangeSig),
-      withRatchet ? Buffer.from(who.ratchetKey) : null,
-      withRatchet ? Buffer.from(who.ratchetSig) : null,
-    ],
+    "INSERT INTO users (user_id, identity_pubkey, ratchet_pubkey, ratchet_sig) VALUES ($1, $2, $3, $4)",
+    [who.userId, Buffer.from(who.identity.publicKey), Buffer.from(who.ratchetKey), Buffer.from(who.ratchetSig)],
   );
 }
 

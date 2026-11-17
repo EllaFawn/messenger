@@ -19,16 +19,10 @@ export function usersRouter(deps: AuthDeps): Router {
 
     const result = await deps.pool.query<{
       identity_pubkey: Buffer;
-      exchange_pubkey: Buffer;
-      exchange_sig: Buffer;
-      ratchet_pubkey: Buffer | null;
-      ratchet_sig: Buffer | null;
+      ratchet_pubkey: Buffer;
+      ratchet_sig: Buffer;
       key_epoch: number;
-    }>(
-      `SELECT identity_pubkey, exchange_pubkey, exchange_sig, ratchet_pubkey, ratchet_sig, key_epoch
-       FROM users WHERE user_id = $1`,
-      [userId],
-    );
+    }>("SELECT identity_pubkey, ratchet_pubkey, ratchet_sig, key_epoch FROM users WHERE user_id = $1", [userId]);
     const row = result.rows[0];
     if (row === undefined) {
       res.status(404).json({ error: "not_found" });
@@ -38,13 +32,10 @@ export function usersRouter(deps: AuthDeps): Router {
     res.json({
       userID: userId,
       identity_pubkey: row.identity_pubkey.toString("base64"),
-      exchange_pubkey: row.exchange_pubkey.toString("base64"),
-      // The identity key's signature over the exchange key; callers verify it.
-      exchange_sig: row.exchange_sig.toString("base64"),
-      // The long-term ratchet key and the identity key's signature over it, or
-      // null for an account that has not set one. Reading these spends no one-time key.
-      ratchet_pubkey: row.ratchet_pubkey?.toString("base64") ?? null,
-      ratchet_sig: row.ratchet_sig?.toString("base64") ?? null,
+      // The long-term ratchet key and the identity key's signature over it;
+      // callers verify it. Reading these spends no one-time key.
+      ratchet_pubkey: row.ratchet_pubkey.toString("base64"),
+      ratchet_sig: row.ratchet_sig.toString("base64"),
       key_epoch: row.key_epoch,
     });
     },

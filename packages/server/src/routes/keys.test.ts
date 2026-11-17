@@ -151,14 +151,6 @@ describe("POST /keys/one-time", () => {
     expect(new Uint8Array(rows.rows[0]!.pubkey)).toEqual(original.key);
   });
 
-  it("refuses an account that has no ratchet key yet", async () => {
-    const carol = makeIdentity();
-    await insertUser(db.pool, carol, { ratchet: false });
-    const res = await uploadKeys(carol, makeOneTimeKeys(carol, 1));
-    expect(res.status).toBe(409);
-    expect(await res.json()).toEqual({ error: "no_ratchet_key" });
-  });
-
   it.each([
     ["an empty upload", {}],
     ["an empty list and no fallback", { keys: [] }],
@@ -278,10 +270,8 @@ describe("POST /users/:userID/keys/claim", () => {
     expect(await res.json()).toEqual({ error: "no_one_time_keys" });
   });
 
-  it("returns 404 for an unknown user, a malformed id, and a user with no ratchet key", async () => {
-    const carol = makeIdentity();
-    await insertUser(db.pool, carol, { ratchet: false });
-    for (const target of [makeIdentity().userId, "not-an-id", carol.userId]) {
+  it("returns 404 for an unknown user and a malformed id", async () => {
+    for (const target of [makeIdentity().userId, "not-an-id"]) {
       const res = await claim(alice, target);
       expect(res.status).toBe(404);
       expect(await res.json()).toEqual({ error: "not_found" });

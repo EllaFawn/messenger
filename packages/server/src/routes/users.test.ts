@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { deriveUserId, verifyExchangeKey, verifyRatchetKey } from "@messager/protocol";
+import { deriveUserId, verifyRatchetKey } from "@messager/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
 import { migrate } from "../db/migrate.js";
@@ -43,8 +43,6 @@ describe("GET /users/:userID/pubkeys", () => {
     expect(await res.json()).toEqual({
       userID: bob.userId,
       identity_pubkey: crypto.toBase64(bob.identity.publicKey),
-      exchange_pubkey: crypto.toBase64(bob.exchange.publicKey),
-      exchange_sig: crypto.toBase64(bob.exchangeSig),
       ratchet_pubkey: crypto.toBase64(bob.ratchetKey),
       ratchet_sig: crypto.toBase64(bob.ratchetSig),
       key_epoch: 1,
@@ -83,16 +81,6 @@ describe("GET /users/:userID/pubkeys", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns a signature that proves the exchange key belongs to the userID", async () => {
-    const res = await signedFetch(server.url, alice, `/users/${bob.userId}/pubkeys`, { timestamp: NOW });
-    const keys = (await res.json()) as { identity_pubkey: string; exchange_pubkey: string; exchange_sig: string };
-    const identityKey = crypto.fromBase64(keys.identity_pubkey);
-    expect(deriveUserId(identityKey)).toBe(bob.userId);
-    expect(
-      verifyExchangeKey(crypto.fromBase64(keys.exchange_pubkey), crypto.fromBase64(keys.exchange_sig), identityKey),
-    ).toBe(true);
-  });
-
   it("returns a ratchet key that verifies against the userID, without spending a one-time key", async () => {
     await db.pool.query(
       "INSERT INTO one_time_keys (user_id, key_id, pubkey, sig) VALUES ($1, 'k', $2, $3)",
@@ -100,6 +88,7 @@ describe("GET /users/:userID/pubkeys", () => {
     );
     const res = await signedFetch(server.url, alice, `/users/${bob.userId}/pubkeys`, { timestamp: NOW });
     const keys = (await res.json()) as { identity_pubkey: string; ratchet_pubkey: string; ratchet_sig: string };
+    expect(deriveUserId(crypto.fromBase64(keys.identity_pubkey))).toBe(bob.userId);
     expect(
       verifyRatchetKey(
         crypto.fromBase64(keys.ratchet_pubkey),
@@ -110,20 +99,10 @@ describe("GET /users/:userID/pubkeys", () => {
     expect((await db.pool.query("SELECT count(*)::int AS n FROM one_time_keys")).rows[0].n).toBe(1);
   });
 
-  it("reports no ratchet key for an account that has not set one", async () => {
-    const carol = makeIdentity();
-    await insertUser(db.pool, carol, { ratchet: false });
-    const res = await signedFetch(server.url, alice, `/users/${carol.userId}/pubkeys`, { timestamp: NOW });
-    const keys = (await res.json()) as { ratchet_pubkey: unknown; ratchet_sig: unknown };
-    expect(keys.ratchet_pubkey).toBeNull();
-    expect(keys.ratchet_sig).toBeNull();
-  });
-
   it("never returns private key material", async () => {
     const res = await signedFetch(server.url, alice, `/users/${bob.userId}/pubkeys`, { timestamp: NOW });
     const text = await res.text();
     expect(text).not.toContain(crypto.toBase64(bob.identity.privateKey));
-    expect(text).not.toContain(crypto.toBase64(bob.exchange.privateKey));
-    expect(Object.keys(JSON.parse(text)).sort()).toEqual(["exchange_pubkey", "exchange_sig", "identity_pubkey", "key_epoch", "ratchet_pubkey", "ratchet_sig", "userID"]);
+    expect(Object.keys(JSON.parse(text)).sort()).toEqual(["identity_pubkey", "key_epoch", "ratchet_pubkey", "ratchet_sig", "userID"]);
   });
 });

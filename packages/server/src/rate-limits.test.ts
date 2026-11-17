@@ -72,7 +72,7 @@ function call(who: TestIdentity, path: string, options: Partial<SignedFetchOptio
 function send(from: TestIdentity, to: TestIdentity) {
   return call(from, "/messages", {
     method: "POST",
-    body: JSON.stringify(encodeEnvelope(to.userId, crypto.randomBytes(24), crypto.randomBytes(32))),
+    body: JSON.stringify(encodeEnvelope(to.userId, { type: 1, body: crypto.randomBytes(32) })),
   });
 }
 
@@ -85,8 +85,8 @@ async function registerFrom(address: string, base = server.url): Promise<Respons
     body: JSON.stringify({
       userID: who.userId,
       identity_pubkey: crypto.toBase64(who.identity.publicKey),
-      exchange_pubkey: crypto.toBase64(who.exchange.publicKey),
-      exchange_sig: crypto.toBase64(who.exchangeSig),
+      ratchet_pubkey: crypto.toBase64(who.ratchetKey),
+      ratchet_sig: crypto.toBase64(who.ratchetSig),
       inviteCode: await issueInvite(db.pool),
     }),
   });
@@ -187,7 +187,7 @@ describe("per-user limits", () => {
     const res = await call(alice, "/messages", {
       method: "POST",
       from: "198.51.100.99",
-      body: JSON.stringify(encodeEnvelope(bob.userId, crypto.randomBytes(24), crypto.randomBytes(32))),
+      body: JSON.stringify(encodeEnvelope(bob.userId, { type: 1, body: crypto.randomBytes(32) })),
     });
     await expectLimited(res);
   });

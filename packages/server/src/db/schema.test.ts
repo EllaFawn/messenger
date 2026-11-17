@@ -6,7 +6,6 @@ let db: TestDatabase;
 
 const KEY_A = Buffer.alloc(32, 1);
 const KEY_B = Buffer.alloc(32, 2);
-const NONCE = Buffer.alloc(24, 3);
 const CIPHERTEXT = Buffer.from("opaque ciphertext");
 
 beforeAll(async () => {
@@ -27,23 +26,23 @@ const SIG = Buffer.alloc(64, 3);
 function insertUser(
   userId: string,
   identityKey: Buffer = KEY_A,
-  exchangeKey: Buffer = KEY_B,
-  exchangeSig: Buffer | null = SIG,
+  ratchetKey: Buffer | null = KEY_B,
+  ratchetSig: Buffer | null = SIG,
 ) {
   return db.pool.query(
-    "INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig) VALUES ($1, $2, $3, $4) RETURNING *",
-    [userId, identityKey, exchangeKey, exchangeSig],
+    "INSERT INTO users (user_id, identity_pubkey, ratchet_pubkey, ratchet_sig) VALUES ($1, $2, $3, $4) RETURNING *",
+    [userId, identityKey, ratchetKey, ratchetSig],
   );
 }
 
-function insertMessage(from: string, to: string, nonce: Buffer = NONCE) {
+function insertMessage(from: string, to: string, type: number | null = 1) {
   return db.pool.query(
-    "INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext) VALUES ($1, $2, $3, $4) RETURNING *",
-    [from, to, nonce, CIPHERTEXT],
+    "INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext) VALUES ($1, $2, $3, $4) RETURNING *",
+    [from, to, type, CIPHERTEXT],
   );
 }
 
-describe("initial schema", () => {
+describe("schema", () => {
   it("creates exactly the expected tables", async () => {
     const result = await db.pool.query(
       "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' ORDER BY table_name",
@@ -62,7 +61,8 @@ describe("initial schema", () => {
     it("stores a user and fills in created_at", async () => {
       const result = await insertUser("alice");
       expect(result.rows[0].identity_pubkey).toEqual(KEY_A);
-      expect(result.rows[0].exchange_pubkey).toEqual(KEY_B);
+      expect(result.rows[0].ratchet_pubkey).toEqual(KEY_B);
+      expect(result.rows[0].key_epoch).toBe(1);
       expect(result.rows[0].created_at).toBeInstanceOf(Date);
     });
 
@@ -75,21 +75,22 @@ describe("initial schema", () => {
       await expect(insertUser("alice", Buffer.alloc(31, 1))).rejects.toThrow(/identity_pubkey/);
     });
 
-    it("rejects an exchange key that is not 32 bytes", async () => {
-      await expect(insertUser("alice", KEY_A, Buffer.alloc(33, 2))).rejects.toThrow(/exchange_pubkey/);
+    it("rejects a ratchet key that is not 32 bytes", async () => {
+      await expect(insertUser("alice", KEY_A, Buffer.alloc(33, 2))).rejects.toThrow(/ratchet_pubkey/);
     });
 
-    it("stores the exchange-key signature", async () => {
+    it("stores the ratchet-key signature", async () => {
       const result = await insertUser("alice");
-      expect(result.rows[0].exchange_sig).toEqual(SIG);
+      expect(result.rows[0].ratchet_sig).toEqual(SIG);
     });
 
-    it("rejects a user with no exchange-key signature", async () => {
-      await expect(insertUser("alice", KEY_A, KEY_B, null)).rejects.toThrow(/exchange_sig/);
+    it("rejects a user with no ratchet key or no signature", async () => {
+      await expect(insertUser("alice", KEY_A, null)).rejects.toThrow(/ratchet_pubkey/);
+      await expect(insertUser("alice", KEY_A, KEY_B, null)).rejects.toThrow(/ratchet_sig/);
     });
 
-    it("rejects an exchange-key signature that is not 64 bytes", async () => {
-      await expect(insertUser("alice", KEY_A, KEY_B, Buffer.alloc(63, 3))).rejects.toThrow(/exchange_sig/);
+    it("rejects a ratchet-key signature that is not 64 bytes", async () => {
+      await expect(insertUser("alice", KEY_A, KEY_B, Buffer.alloc(63, 3))).rejects.toThrow(/ratchet_sig/);
     });
   });
 
@@ -106,6 +107,7 @@ describe("initial schema", () => {
       expect(row.created_at).toBeInstanceOf(Date);
       expect(row.delivered_at).toBeNull();
       expect(row.ciphertext).toEqual(CIPHERTEXT);
+      expect(row.v).toBe(2);
     });
 
     it("rejects a message to an unknown user", async () => {
@@ -116,8 +118,9 @@ describe("initial schema", () => {
       await expect(insertMessage("nobody", "bob")).rejects.toThrow(/from_user_id/);
     });
 
-    it("rejects a nonce that is not 24 bytes", async () => {
-      await expect(insertMessage("alice", "bob", Buffer.alloc(12, 3))).rejects.toThrow(/nonce/);
+    it("rejects a message with no type or an unknown type", async () => {
+      await expect(insertMessage("alice", "bob", null)).rejects.toThrow(/msg_type/);
+      await expect(insertMessage("alice", "bob", 2)).rejects.toThrow(/messages_are_ratchet_messages/);
     });
   });
 

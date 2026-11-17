@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { signExchangeKey, signRatchetKey } from "@messager/protocol";
+import { signRatchetKey } from "@messager/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
 import { TIMESTAMP_WINDOW_MS } from "../auth/signed-request.js";
@@ -38,8 +38,8 @@ function registrationBody(who: TestIdentity, overrides: Record<string, unknown> 
   return JSON.stringify({
     userID: who.userId,
     identity_pubkey: crypto.toBase64(who.identity.publicKey),
-    exchange_pubkey: crypto.toBase64(who.exchange.publicKey),
-    exchange_sig: crypto.toBase64(who.exchangeSig),
+    ratchet_pubkey: crypto.toBase64(who.ratchetKey),
+    ratchet_sig: crypto.toBase64(who.ratchetSig),
     inviteCode: invite,
     ...overrides,
   });
@@ -65,7 +65,7 @@ async function expectRejected(res: Response, status: number, error: string) {
 }
 
 describe("POST /register", () => {
-  it("registers a new user and stores both public keys", async () => {
+  it("registers a new user and stores the identity key and the signed ratchet key", async () => {
     const res = await register(alice, registrationBody(alice));
 
     expect(res.status).toBe(201);
@@ -74,17 +74,12 @@ describe("POST /register", () => {
     expect(stored.rows).toHaveLength(1);
     expect(stored.rows[0].user_id).toBe(alice.userId);
     expect(new Uint8Array(stored.rows[0].identity_pubkey)).toEqual(alice.identity.publicKey);
-    expect(new Uint8Array(stored.rows[0].exchange_pubkey)).toEqual(alice.exchange.publicKey);
-    expect(new Uint8Array(stored.rows[0].exchange_sig)).toEqual(alice.exchangeSig);
+    expect(new Uint8Array(stored.rows[0].ratchet_pubkey)).toEqual(alice.ratchetKey);
+    expect(new Uint8Array(stored.rows[0].ratchet_sig)).toEqual(alice.ratchetSig);
   });
 
   describe("ratchet key", () => {
-    const withRatchet = (who: TestIdentity, overrides: Record<string, unknown> = {}) =>
-      registrationBody(who, {
-        ratchet_pubkey: crypto.toBase64(who.ratchetKey),
-        ratchet_sig: crypto.toBase64(who.ratchetSig),
-        ...overrides,
-      });
+    const withRatchet = registrationBody;
 
     it("stores a signed ratchet key given at registration", async () => {
       expect((await register(alice, withRatchet(alice))).status).toBe(201);
@@ -94,11 +89,9 @@ describe("POST /register", () => {
       expect(row.key_epoch).toBe(1);
     });
 
-    it("still registers an account without one, for now", async () => {
-      expect((await register(alice, registrationBody(alice))).status).toBe(201);
-      const row = (await db.pool.query("SELECT ratchet_pubkey, ratchet_sig FROM users")).rows[0];
-      expect(row.ratchet_pubkey).toBeNull();
-      expect(row.ratchet_sig).toBeNull();
+    it("refuses an account without one", async () => {
+      const res = await register(alice, withRatchet(alice, { ratchet_pubkey: undefined, ratchet_sig: undefined }));
+      await expectRejected(res, 400, "invalid_request");
     });
 
     it("rejects a ratchet key the identity key did not sign", async () => {
@@ -114,9 +107,13 @@ describe("POST /register", () => {
       await expectRejected(res, 400, "invalid_request");
     });
 
-    it("does not accept an exchange-key signature in its place", async () => {
-      // Same key bytes, signed for the other purpose.
-      const wrongPurpose = signExchangeKey(alice.ratchetKey, alice.identity.privateKey);
+    it("does not accept a signature made for another purpose", async () => {
+      // Same key bytes, signed as the retired static exchange key was.
+      const prefix = crypto.utf8Encode("messager/v1/exchange-key\n");
+      const statement = new Uint8Array(prefix.length + 32);
+      statement.set(prefix, 0);
+      statement.set(alice.ratchetKey, prefix.length);
+      const wrongPurpose = crypto.sign(alice.identity.privateKey, statement);
       const res = await register(alice, withRatchet(alice, { ratchet_sig: crypto.toBase64(wrongPurpose) }));
       await expectRejected(res, 400, "invalid_request");
     });
@@ -128,6 +125,10 @@ describe("POST /register", () => {
       ["a signature of the wrong length", { ratchet_sig: "AAAA" }],
       ["a key that is not text", { ratchet_pubkey: 7 }],
       ["a null key", { ratchet_pubkey: null }],
+      ["a key that is not base64", { ratchet_pubkey: "!".repeat(44) }],
+      ["a signature that is not base64", { ratchet_sig: "!".repeat(88) }],
+      ["a signature of all zero bytes", { ratchet_sig: Buffer.alloc(64).toString("base64") }],
+      ["the retired exchange key in place of the ratchet key", { ratchet_pubkey: undefined, exchange_pubkey: "A".repeat(43) + "=" }],
     ])("rejects %s", async (_label, overrides) => {
       const res = await register(alice, withRatchet(alice, overrides));
       await expectRejected(res, 400, "invalid_request");
@@ -136,33 +137,6 @@ describe("POST /register", () => {
     it("does not use up the invite when the ratchet key is refused", async () => {
       await register(alice, withRatchet(alice, { ratchet_sig: "AAAA" }));
       expect((await inviteState()).used_at).toBeNull();
-    });
-  });
-
-  describe("exchange-key signature", () => {
-    it("rejects an exchange key that the identity key did not sign", async () => {
-      // A correctly signed request, but the exchange key is not the one the signature vouches for.
-      const otherKey = crypto.toBase64(makeIdentity().exchange.publicKey);
-      const res = await register(alice, registrationBody(alice, { exchange_pubkey: otherKey }));
-      await expectRejected(res, 400, "invalid_request");
-    });
-
-    it("rejects a signature made by someone else's identity key", async () => {
-      const mallory = makeIdentity();
-      const forged = signExchangeKey(alice.exchange.publicKey, mallory.identity.privateKey);
-      const res = await register(alice, registrationBody(alice, { exchange_sig: crypto.toBase64(forged) }));
-      await expectRejected(res, 400, "invalid_request");
-    });
-
-    it.each([
-      ["missing", undefined],
-      ["of the wrong length", Buffer.alloc(63).toString("base64")],
-      ["not base64", "!".repeat(88)],
-      ["not text", 12345],
-      ["all zero bytes", Buffer.alloc(64).toString("base64")],
-    ])("rejects a signature that is %s", async (_label, value) => {
-      const res = await register(alice, registrationBody(alice, { exchange_sig: value }));
-      await expectRejected(res, 400, "invalid_request");
     });
   });
 
@@ -276,11 +250,11 @@ describe("POST /register", () => {
     });
 
     it("rejects a body changed after signing", async () => {
-      // The swapped-in exchange key is validly signed, so only the request signature can catch the change.
-      const attackerKey = makeIdentity().exchange.publicKey;
+      // The swapped-in ratchet key is validly signed, so only the request signature can catch the change.
+      const attackerKey = makeIdentity().ratchetKey;
       const tampered = registrationBody(alice, {
-        exchange_pubkey: crypto.toBase64(attackerKey),
-        exchange_sig: crypto.toBase64(signExchangeKey(attackerKey, alice.identity.privateKey)),
+        ratchet_pubkey: crypto.toBase64(attackerKey),
+        ratchet_sig: crypto.toBase64(signRatchetKey(attackerKey, alice.identity.privateKey)),
       });
       const res = await register(alice, tampered, { signAs: { body: registrationBody(alice) } });
       await expectRejected(res, 401, "unauthorized");
@@ -328,34 +302,34 @@ describe("POST /register", () => {
 
     it("refuses to register the same user twice and never replaces stored keys", async () => {
       await register(alice, registrationBody(alice));
-      const newExchangeKey = makeIdentity().exchange.publicKey;
+      const newRatchetKey = makeIdentity().ratchetKey;
 
       // Properly signed by Alice's own identity key, so only the "already registered" rule can stop it.
       const res = await register(
         alice,
         registrationBody(alice, {
-          exchange_pubkey: crypto.toBase64(newExchangeKey),
-          exchange_sig: crypto.toBase64(signExchangeKey(newExchangeKey, alice.identity.privateKey)),
+          ratchet_pubkey: crypto.toBase64(newRatchetKey),
+          ratchet_sig: crypto.toBase64(signRatchetKey(newRatchetKey, alice.identity.privateKey)),
           inviteCode: await issueInvite(db.pool),
         }),
       );
 
       expect(res.status).toBe(409);
       expect(await res.json()).toEqual({ error: "already_registered" });
-      const stored = await db.pool.query("SELECT exchange_pubkey FROM users WHERE user_id = $1", [alice.userId]);
-      expect(new Uint8Array(stored.rows[0].exchange_pubkey)).toEqual(alice.exchange.publicKey);
+      const stored = await db.pool.query("SELECT ratchet_pubkey FROM users WHERE user_id = $1", [alice.userId]);
+      expect(new Uint8Array(stored.rows[0].ratchet_pubkey)).toEqual(alice.ratchetKey);
     });
   });
 
   describe("malformed bodies", () => {
     it.each([
       ["missing inviteCode", { inviteCode: undefined }],
-      ["missing exchange_pubkey", { exchange_pubkey: undefined }],
+      ["missing ratchet_pubkey", { ratchet_pubkey: undefined }],
       ["missing identity_pubkey", { identity_pubkey: undefined }],
       ["missing userID", { userID: undefined }],
       ["identity key of the wrong length", { identity_pubkey: "AAAA" }],
-      ["exchange key of the wrong length", { exchange_pubkey: Buffer.alloc(33).toString("base64") }],
-      ["key that is not base64", { exchange_pubkey: "!".repeat(44) }],
+      ["ratchet key of the wrong length", { ratchet_pubkey: Buffer.alloc(33).toString("base64") }],
+      ["key that is not base64", { identity_pubkey: "!".repeat(44) }],
       ["non-string invite code", { inviteCode: 12345 }],
       ["empty invite code", { inviteCode: "" }],
       ["oversized invite code", { inviteCode: "x".repeat(300) }],

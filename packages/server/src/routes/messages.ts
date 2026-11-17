@@ -7,10 +7,8 @@ import {
   type AuthDeps,
 } from "../auth/signed-request.js";
 
-/** Standard base64 of exactly 24 bytes (an XChaCha20 nonce); no padding needed at that length. */
-const MESSAGE_NONCE_PATTERN = /^[A-Za-z0-9+/]{32}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-/** A ciphertext always carries a 16-byte Poly1305 tag, so nothing shorter can be genuine. */
+/** Even an empty ratchet message is longer than this, so nothing shorter can be genuine. */
 const MIN_CIPHERTEXT_BYTES = 16;
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -18,10 +16,12 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 /** Most messages returned by one inbox fetch. Acknowledging them brings the next ones into view. */
 export const INBOX_PAGE_SIZE = 100;
 
-/** v1: static-key message with its own nonce. v2: ratchet message, typed pre-key (0) or normal (1). */
-type IncomingEnvelope =
-  | { v: 1; to: string; nonce: Buffer; ciphertext: Buffer }
-  | { v: 2; to: string; type: 0 | 1; ciphertext: Buffer };
+/** A ratchet message: a pre-key message (0), which can create the session, or a normal one (1). */
+interface IncomingEnvelope {
+  to: string;
+  type: 0 | 1;
+  ciphertext: Buffer;
+}
 
 /** Decodes standard base64, accepting only the one canonical spelling of the bytes. */
 function decodeStrictBase64(text: string): Buffer | null {
@@ -37,31 +37,22 @@ function parseEnvelope(body: unknown): IncomingEnvelope | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return null;
   }
-  const { v, to, nonce, type, ciphertext } = body as Record<string, unknown>;
-  if (typeof to !== "string" || typeof ciphertext !== "string" || !USER_ID_PATTERN.test(to)) {
+  const { v, to, type, ciphertext } = body as Record<string, unknown>;
+  // Version 2 only. Version 1 (static keys, with a separate nonce) is retired.
+  if (
+    v !== 2 ||
+    (type !== 0 && type !== 1) ||
+    typeof to !== "string" ||
+    typeof ciphertext !== "string" ||
+    !USER_ID_PATTERN.test(to)
+  ) {
     return null;
   }
   const ciphertextBytes = decodeStrictBase64(ciphertext);
   if (ciphertextBytes === null || ciphertextBytes.length < MIN_CIPHERTEXT_BYTES) {
     return null;
   }
-
-  if (v === 2) {
-    // A ratchet message has no separate nonce; sending one means the client is confused.
-    if ((type !== 0 && type !== 1) || nonce !== undefined) {
-      return null;
-    }
-    return { v: 2, to, type, ciphertext: ciphertextBytes };
-  }
-
-  if (v !== 1 || type !== undefined || typeof nonce !== "string" || !MESSAGE_NONCE_PATTERN.test(nonce)) {
-    return null;
-  }
-  const nonceBytes = decodeStrictBase64(nonce);
-  if (nonceBytes === null) {
-    return null;
-  }
-  return { v: 1, to, nonce: nonceBytes, ciphertext: ciphertextBytes };
+  return { to, type, ciphertext: ciphertextBytes };
 }
 
 /** How many undelivered messages the server will hold. */
@@ -128,22 +119,13 @@ export function messagesRouter(deps: MessagesDeps): Router {
     // both pass and overshoot by one; the limits are a bound on abuse, not
     // an exact quota.
     const inserted = await deps.pool.query<{ message_id: string; created_at: Date }>(
-      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, v, msg_type)
-       SELECT $1, $2, $3, $4, $7, $8
+      `INSERT INTO messages (from_user_id, to_user_id, ciphertext, v, msg_type)
+       SELECT $1, $2, $3, 2, $6
        WHERE EXISTS (SELECT 1 FROM users WHERE user_id = $2)
-         AND (SELECT count(*) FROM messages WHERE to_user_id = $2 AND from_user_id = $1) < $5
-         AND (SELECT count(*) FROM messages WHERE to_user_id = $2) < $6
+         AND (SELECT count(*) FROM messages WHERE to_user_id = $2 AND from_user_id = $1) < $4
+         AND (SELECT count(*) FROM messages WHERE to_user_id = $2) < $5
        RETURNING message_id, created_at`,
-      [
-        from,
-        envelope.to,
-        envelope.v === 1 ? envelope.nonce : null,
-        envelope.ciphertext,
-        queueLimits.perPair,
-        queueLimits.perRecipient,
-        envelope.v,
-        envelope.v === 2 ? envelope.type : null,
-      ],
+      [from, envelope.to, envelope.ciphertext, queueLimits.perPair, queueLimits.perRecipient, envelope.type],
     );
     const row = inserted.rows[0];
     if (row === undefined) {
@@ -168,8 +150,8 @@ export function messagesRouter(deps: MessagesDeps): Router {
 
   // Every message for the caller that has not been acknowledged yet, oldest first.
   // A message keeps coming back until it is acked, so a client that crashes
-  // between fetching and saving does not lose it; the client's counter check
-  // discards repeats. delivered_at only records the first fetch.
+  // between fetching and saving does not lose it; a repeat of one it did save
+  // no longer decrypts, and is dropped. delivered_at only records the first fetch.
   //
   // One page per request. `?after=<cursor>` continues from an earlier item,
   // so a client can step past messages it has chosen to leave here.
@@ -188,12 +170,11 @@ export function messagesRouter(deps: MessagesDeps): Router {
     const result = await deps.pool.query<{
       message_id: string;
       from_user_id: string;
-      nonce: Buffer | null;
       ciphertext: Buffer;
       created_at: Date;
       micros: string;
       v: number;
-      msg_type: number | null;
+      msg_type: number;
     }>(
       `WITH page AS (
          SELECT message_id FROM messages
@@ -206,7 +187,7 @@ export function messagesRouter(deps: MessagesDeps): Router {
          UPDATE messages SET delivered_at = now()
          WHERE message_id IN (SELECT message_id FROM page) AND delivered_at IS NULL
        )
-       SELECT m.message_id, m.from_user_id, m.nonce, m.ciphertext, m.created_at, m.v, m.msg_type,
+       SELECT m.message_id, m.from_user_id, m.ciphertext, m.created_at, m.v, m.msg_type,
               (extract(epoch FROM m.created_at) * 1000000)::bigint::text AS micros
        FROM messages m JOIN page USING (message_id)
        ORDER BY m.created_at, m.message_id`,
@@ -218,8 +199,7 @@ export function messagesRouter(deps: MessagesDeps): Router {
         message_id: row.message_id,
         from: row.from_user_id,
         v: row.v,
-        // v1 carries a nonce; v2 (ratchet) carries a type instead.
-        ...(row.nonce !== null ? { nonce: row.nonce.toString("base64") } : { type: row.msg_type }),
+        type: row.msg_type,
         ciphertext: row.ciphertext.toString("base64"),
         created_at: row.created_at.toISOString(),
         cursor: `${row.micros}_${row.message_id}`,

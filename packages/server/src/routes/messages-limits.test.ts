@@ -42,7 +42,7 @@ beforeEach(async () => {
 function send(from: TestIdentity, toUserId: string): Promise<Response> {
   return signedFetch(server.url, from, "/messages", {
     method: "POST",
-    body: JSON.stringify(encodeEnvelope(toUserId, crypto.randomBytes(24), crypto.randomBytes(32))),
+    body: JSON.stringify(encodeEnvelope(toUserId, { type: 1, body: crypto.randomBytes(32) })),
     timestamp: Date.now(),
   });
 }
@@ -70,11 +70,11 @@ async function stored(): Promise<number> {
 /** Inserts messages for Bob directly, each one microsecond after the last, and returns their ids in order. */
 async function fill(count: number, from: TestIdentity = alice, to: TestIdentity = bob): Promise<string[]> {
   const result = await db.pool.query<{ message_id: string }>(
-    `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
+    `INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext, created_at)
      SELECT $1, $2, $3, $4, now() - interval '1 hour' + n * interval '1 microsecond'
      FROM generate_series(1, $5::int) AS n
      RETURNING message_id, created_at`,
-    [from.userId, to.userId, Buffer.alloc(24), Buffer.alloc(16), count],
+    [from.userId, to.userId, 1, Buffer.alloc(16), count],
   );
   const ordered = await db.pool.query<{ message_id: string }>(
     "SELECT message_id FROM messages WHERE message_id = ANY($1) ORDER BY created_at, message_id",
@@ -149,9 +149,9 @@ describe("inbox paging", () => {
 
   it("orders messages with exactly the same time consistently across pages", async () => {
     await db.pool.query(
-      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
+      `INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext, created_at)
        SELECT $1, $2, $3, $4, '2027-01-01T00:00:00Z' FROM generate_series(1, 8)`,
-      [alice.userId, bob.userId, Buffer.alloc(24), Buffer.alloc(16)],
+      [alice.userId, bob.userId, 1, Buffer.alloc(16)],
     );
     const seen = new Set<string>();
     let after: string | undefined;
@@ -240,11 +240,11 @@ describe("sweepExpiredMessages", () => {
   it("deletes undelivered messages older than the limit and keeps the rest", async () => {
     const day = 86_400_000;
     await db.pool.query(
-      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at) VALUES
+      `INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext, created_at) VALUES
          ($1, $2, $3, $4, now() - interval '31 days'),
          ($1, $2, $3, $4, now() - interval '29 days'),
          ($1, $2, $3, $4, now())`,
-      [alice.userId, bob.userId, Buffer.alloc(24), Buffer.alloc(16)],
+      [alice.userId, bob.userId, 1, Buffer.alloc(16)],
     );
     expect(await sweepExpiredMessages(db.pool, new Date(), 30 * day)).toBe(1);
     expect(await stored()).toBe(2);
