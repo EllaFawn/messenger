@@ -1,5 +1,4 @@
 import * as crypto from "@messager/crypto";
-import { encodeEnvelope } from "@messager/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
 import { migrate } from "../db/migrate.js";
@@ -50,18 +49,18 @@ async function stored(): Promise<number> {
   return (await db.pool.query("SELECT count(*)::int AS n FROM messages")).rows[0].n;
 }
 
-describe("ratchet (v2) messages", () => {
+describe("ratchet message types", () => {
   it.each([
     ["a pre-key message", 0],
     ["a normal message", 1],
-  ])("stores and delivers %s with its type and no nonce", async (_name, type) => {
+  ])("stores and delivers %s with its type", async (_name, type) => {
     const envelope = ratchetEnvelope(bob.userId, type);
     const res = await send(alice, envelope);
     expect(res.status).toBe(201);
     const sent = (await res.json()) as { message_id: string };
 
-    const row = (await db.pool.query("SELECT v, msg_type, nonce, from_user_id FROM messages")).rows[0];
-    expect(row).toEqual({ v: 2, msg_type: type, nonce: null, from_user_id: alice.userId });
+    const row = (await db.pool.query("SELECT v, msg_type, from_user_id FROM messages")).rows[0];
+    expect(row).toEqual({ v: 2, msg_type: type, from_user_id: alice.userId });
 
     const items = await inbox(bob);
     expect(items).toHaveLength(1);
@@ -82,8 +81,7 @@ describe("ratchet (v2) messages", () => {
     ["an unknown type", { type: 2 }],
     ["a type sent as text", { type: "0" }],
     ["a negative type", { type: -1 }],
-    ["a nonce, which ratchet messages do not have", { nonce: "A".repeat(32) }],
-    ["an empty ciphertext", { ciphertext: "" }],
+        ["an empty ciphertext", { ciphertext: "" }],
     ["a ciphertext that is not base64", { ciphertext: "not base64!!" }],
     ["a malformed recipient", { to: "nobody" }],
     ["an unknown version", { v: 3 }],
@@ -94,12 +92,14 @@ describe("ratchet (v2) messages", () => {
     expect(await stored()).toBe(0);
   });
 
-  it("rejects a v1 message that carries a ratchet type", async () => {
-    const v1 = { ...encodeEnvelope(bob.userId, crypto.randomBytes(24), crypto.randomBytes(32)), type: 1 };
-    expect((await send(alice, v1)).status).toBe(400);
+  it("rejects the retired static-key (v1) format", async () => {
+    const v1 = { v: 1, to: bob.userId, nonce: "A".repeat(32), ciphertext: crypto.toBase64(crypto.randomBytes(32)) };
+    const res = await send(alice, v1);
+    expect(res.status).toBe(400);
+    expect(await stored()).toBe(0);
   });
 
-  it("takes the sender from the signature, as with v1", async () => {
+  it("takes the sender from the signature, not the body", async () => {
     await send(alice, ratchetEnvelope(bob.userId, 1, { from: bob.userId }));
     expect((await inbox(bob))[0]!.from).toBe(alice.userId);
   });
@@ -113,59 +113,75 @@ describe("ratchet (v2) messages", () => {
     expect(res.status).toBe(204);
     expect(await stored()).toBe(0);
   });
-
-  it("delivers v1 and v2 messages side by side, each in its own shape", async () => {
-    const v1 = encodeEnvelope(bob.userId, crypto.randomBytes(24), crypto.randomBytes(32));
-    await send(alice, v1);
-    await send(alice, ratchetEnvelope(bob.userId, 1));
-
-    const items = await inbox(bob);
-    expect(items.map((item) => item.v)).toEqual([1, 2]);
-    expect(items[0]).toMatchObject({ v: 1, nonce: v1.nonce });
-    expect(items[0]).not.toHaveProperty("type");
-    expect(items[1]).toMatchObject({ v: 2, type: 1 });
-    expect(items[1]).not.toHaveProperty("nonce");
-  });
 });
 
 describe("message shape in the database", () => {
-  const insert = (v: number, nonce: Buffer | null, type: number | null) =>
-    db.pool.query(
-      "INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, v, msg_type) VALUES ($1, $2, $3, $4, $5, $6)",
-      [alice.userId, bob.userId, nonce, Buffer.alloc(32), v, type],
-    );
+  const insert = (v: number, type: number | null) =>
+    db.pool.query("INSERT INTO messages (from_user_id, to_user_id, ciphertext, v, msg_type) VALUES ($1, $2, $3, $4, $5)", [
+      alice.userId,
+      bob.userId,
+      Buffer.alloc(32),
+      v,
+      type,
+    ]);
 
-  it("refuses rows that mix the two versions", async () => {
-    await expect(insert(1, null, null)).rejects.toThrow(/messages_shape_matches_version/);
-    await expect(insert(1, Buffer.alloc(24), 1)).rejects.toThrow(/messages_shape_matches_version/);
-    await expect(insert(2, Buffer.alloc(24), 1)).rejects.toThrow(/messages_shape_matches_version/);
-    await expect(insert(2, null, null)).rejects.toThrow(/messages_shape_matches_version/);
-    await expect(insert(2, null, 5)).rejects.toThrow(/messages_shape_matches_version/);
-    await expect(insert(3, null, 1)).rejects.toThrow(/messages_shape_matches_version/);
+  it("refuses anything that is not a typed ratchet message", async () => {
+    await expect(insert(1, 1)).rejects.toThrow(/messages_are_ratchet_messages/);
+    await expect(insert(3, 1)).rejects.toThrow(/messages_are_ratchet_messages/);
+    await expect(insert(2, 5)).rejects.toThrow(/messages_are_ratchet_messages/);
+    await expect(insert(2, null)).rejects.toThrow(/msg_type/);
   });
 
-  it("accepts well-formed rows of either version", async () => {
-    await insert(1, Buffer.alloc(24), null);
-    await insert(2, null, 0);
-    await insert(2, null, 1);
-    expect(await stored()).toBe(3);
+  it("has no nonce column any more", async () => {
+    const columns = await db.pool.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'messages' ORDER BY column_name",
+    );
+    expect(columns.rows.map((r) => r.column_name)).toEqual([
+      "ciphertext",
+      "created_at",
+      "delivered_at",
+      "from_user_id",
+      "message_id",
+      "msg_type",
+      "to_user_id",
+      "v",
+    ]);
+  });
+
+  it("accepts both message types", async () => {
+    await insert(2, 0);
+    await insert(2, 1);
+    expect(await stored()).toBe(2);
   });
 });
 
 describe("ratchet key columns in the database", () => {
-  it("requires the ratchet key and its signature together", async () => {
+  it("requires a ratchet key and signature of the right length", async () => {
     const update = (key: Buffer | null, sig: Buffer | null) =>
       db.pool.query("UPDATE users SET ratchet_pubkey = $1, ratchet_sig = $2 WHERE user_id = $3", [
         key,
         sig,
         alice.userId,
       ]);
-    await expect(update(Buffer.alloc(32), null)).rejects.toThrow(/users_ratchet_key_and_sig_together/);
-    await expect(update(null, Buffer.alloc(64))).rejects.toThrow(/users_ratchet_key_and_sig_together/);
+    await expect(update(Buffer.alloc(32), null)).rejects.toThrow(/ratchet_sig/);
+    await expect(update(null, Buffer.alloc(64))).rejects.toThrow(/ratchet_pubkey/);
     await expect(update(Buffer.alloc(31), Buffer.alloc(64))).rejects.toThrow(/ratchet_pubkey/);
     await expect(update(Buffer.alloc(32), Buffer.alloc(63))).rejects.toThrow(/ratchet_sig/);
-    await update(null, null);
     await update(Buffer.alloc(32), Buffer.alloc(64));
+  });
+
+  it("no longer has the static exchange key columns", async () => {
+    const columns = await db.pool.query(
+      "SELECT column_name FROM information_schema.columns WHERE table_name = 'users' ORDER BY column_name",
+    );
+    expect(columns.rows.map((r) => r.column_name)).toEqual([
+      "created_at",
+      "identity_pubkey",
+      "key_epoch",
+      "ratchet_pubkey",
+      "ratchet_sig",
+      "user_id",
+    ]);
   });
 
   it("allows only one fallback key per user", async () => {

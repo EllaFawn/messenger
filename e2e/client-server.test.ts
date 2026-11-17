@@ -180,10 +180,10 @@ describe("limits", () => {
     await befriend(alice, bob);
     // 120 undelivered messages for Bob from someone he has not added: more than one inbox page.
     await db.pool.query(
-      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
-       SELECT $1, $2, $3, $4, now() - interval '1 hour' + n * interval '1 millisecond'
+      `INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext, created_at)
+       SELECT $1, $2, 0, $3, now() - interval '1 hour' + n * interval '1 millisecond'
        FROM generate_series(1, 120) AS n`,
-      [stranger.me.userId, bob.me.userId, Buffer.alloc(24), Buffer.alloc(32)],
+      [stranger.me.userId, bob.me.userId, Buffer.alloc(32)],
     );
     await say(alice, bob, "behind the queue");
 
@@ -216,12 +216,12 @@ describe("a misbehaving server", () => {
     await befriend(alice, bob);
     await say(alice, bob, "transfer 10");
 
-    const copy = (await db.pool.query("SELECT from_user_id, to_user_id, nonce, ciphertext FROM messages")).rows[0];
+    const copy = (await db.pool.query("SELECT from_user_id, to_user_id, msg_type, ciphertext FROM messages")).rows[0];
     await check(bob);
     // The server puts the same ciphertext back in Bob's inbox.
     await db.pool.query(
-      "INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext) VALUES ($1, $2, $3, $4)",
-      [copy.from_user_id, copy.to_user_id, copy.nonce, copy.ciphertext],
+      "INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext) VALUES ($1, $2, $3, $4)",
+      [copy.from_user_id, copy.to_user_id, copy.msg_type, copy.ciphertext],
     );
 
     expect(await check(bob)).toMatchObject({ stored: 0, dropped: 1 });
@@ -242,11 +242,11 @@ describe("a misbehaving server", () => {
     expect(await conversation(bob, alice)).toEqual([]);
   });
 
-  it("cannot hand out its own encryption key for a new contact", async () => {
+  it("cannot hand out its own ratchet key for a new contact", async () => {
     const alice = await newBrowser();
     const bob = await newBrowser();
-    const attackerKey = Buffer.from(crypto.generateExchangeKeyPair().publicKey);
-    await db.pool.query("UPDATE users SET exchange_pubkey = $1 WHERE user_id = $2", [attackerKey, bob.me.userId]);
+    const attackerKey = Buffer.from(crypto.randomBytes(32));
+    await db.pool.query("UPDATE users SET ratchet_pubkey = $1 WHERE user_id = $2", [attackerKey, bob.me.userId]);
 
     const error = await addContact({ db: alice.storage, client, me: alice.me, userId: bob.me.userId }).catch(
       (e: unknown) => e,
@@ -256,17 +256,52 @@ describe("a misbehaving server", () => {
     expect(await getContact(alice.storage, bob.me.userId)).toBeNull();
   });
 
-  it("cannot swap the key of an existing contact", async () => {
+  it("cannot swap the ratchet key of an existing contact", async () => {
     const alice = await newBrowser();
     const bob = await newBrowser();
     await befriend(alice, bob);
-    const attackerKey = Buffer.from(crypto.generateExchangeKeyPair().publicKey);
-    await db.pool.query("UPDATE users SET exchange_pubkey = $1 WHERE user_id = $2", [attackerKey, bob.me.userId]);
+    const attackerKey = Buffer.from(crypto.randomBytes(32));
+    await db.pool.query("UPDATE users SET ratchet_pubkey = $1 WHERE user_id = $2", [attackerKey, bob.me.userId]);
 
     await expect(refreshContactKeys(alice.storage, client, alice.me, bob.me.userId)).rejects.toThrow();
     const pinned = (await getContact(alice.storage, bob.me.userId))!;
-    expect(crypto.toHex(pinned.exchangePublicKey)).toBe(crypto.toHex(bob.me.exchangePublicKey));
+    expect(crypto.toHex(pinned.ratchetPublicKey)).toBe(crypto.toHex(bob.me.ratchetPublicKey));
     expect(canSendTo(pinned)).toBe(true);
+  });
+
+  it("cannot hand out a one-time key of its own", async () => {
+    const alice = await newBrowser();
+    const bob = await newBrowser();
+    await befriend(alice, bob);
+    await db.pool.query("UPDATE one_time_keys SET pubkey = $1 WHERE user_id = $2", [
+      Buffer.from(crypto.randomBytes(32)),
+      bob.me.userId,
+    ]);
+
+    const error = await say(alice, bob, "hello").catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+    expect(await serverCount("messages")).toBe(0);
+  });
+
+  it("cannot read old messages even with a copy of the recipient's keys taken later", async () => {
+    // Forward secrecy, as far as a test can show it: once Bob has read a message,
+    // his saved state no longer decrypts the ciphertext the server kept a copy of.
+    const alice = await newBrowser();
+    const bob = await newBrowser();
+    await befriend(alice, bob);
+    await say(alice, bob, "past secret");
+    const copy = (await db.pool.query("SELECT from_user_id, to_user_id, msg_type, ciphertext FROM messages")).rows[0];
+    await check(bob);
+    await say(bob, alice, "reply");
+    await check(alice);
+    await say(alice, bob, "newer");
+    await check(bob);
+
+    await db.pool.query(
+      "INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext) VALUES ($1, $2, $3, $4)",
+      [copy.from_user_id, copy.to_user_id, copy.msg_type, copy.ciphertext],
+    );
+    expect(await check(bob)).toMatchObject({ stored: 0, dropped: 1 });
   });
 });
 
@@ -300,10 +335,12 @@ describe("signing up", () => {
     expect(await serverCount("users")).toBe(1);
   });
 
-  it("recovers the same identity after the server loses its accounts", async () => {
+  it("recovers the same identity after the server loses its accounts, and carries on the conversation", async () => {
     const alice = await newBrowser();
     const bob = await newBrowser();
     await befriend(alice, bob);
+    await say(alice, bob, "before");
+    await check(bob);
     await db.pool.query("TRUNCATE one_time_keys, invites, messages, auth_nonces, users");
 
     const refused = await check(alice).catch((e: unknown) => e);
@@ -311,8 +348,10 @@ describe("signing up", () => {
 
     expect(await registerAgain({ db: alice.storage, client, inviteCode: await invite() })).toBe("registered");
     expect(await registerAgain({ db: bob.storage, client, inviteCode: await invite() })).toBe("registered");
-    // Same keys as before, so the contacts they pinned for each other still work.
-    await say(alice, bob, "still me");
-    expect((await check(bob)).stored).toBe(1);
+    // Same keys as before, so the pinned contacts and the sessions in each browser still work.
+    await say(bob, alice, "still me");
+    expect((await check(alice)).stored).toBe(1);
+    // And new conversations can start: the one-time keys were published again.
+    expect((await db.pool.query("SELECT count(*)::int AS n FROM one_time_keys WHERE user_id = $1", [alice.me.userId])).rows[0].n).toBe(51);
   });
 });

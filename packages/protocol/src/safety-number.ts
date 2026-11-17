@@ -1,33 +1,34 @@
 import * as crypto from "@messager/crypto";
+import { RATCHET_PUBLIC_KEY_BYTES } from "./ratchet-key-signature.js";
 
 /** One user's public keys, as covered by the safety number. */
 export interface SafetyNumberKeys {
   identityPublicKey: Uint8Array;
-  exchangePublicKey: Uint8Array;
+  ratchetPublicKey: Uint8Array;
 }
 
-const PREFIX = "messager/v1/safety-number\n";
+const PREFIX = "messager/v2/safety-number\n";
 const GROUP_DIGITS = 5;
 const GROUPS_PER_USER = 6;
 const BYTES_PER_GROUP = 5;
 
 /**
- * 30 digits derived from one user's identity AND exchange keys. Covering the
- * exchange key matters: it is the key that encrypts messages, so a swapped
- * exchange key must change the number.
+ * 30 digits derived from one user's identity key AND long-term ratchet key.
+ * Covering the ratchet key matters: it is the key sessions are built on, so
+ * a swapped ratchet key must change the number.
  */
 export function keyFingerprint(keys: SafetyNumberKeys): string {
   if (
     keys.identityPublicKey.length !== crypto.IDENTITY_PUBLIC_KEY_BYTES ||
-    keys.exchangePublicKey.length !== crypto.EXCHANGE_KEY_BYTES
+    keys.ratchetPublicKey.length !== RATCHET_PUBLIC_KEY_BYTES
   ) {
-    throw new Error("safety number needs a 32-byte identity key and a 32-byte exchange key");
+    throw new Error("safety number needs a 32-byte identity key and a 32-byte ratchet key");
   }
   const prefix = crypto.utf8Encode(PREFIX);
   const input = new Uint8Array(prefix.length + 64);
   input.set(prefix, 0);
   input.set(keys.identityPublicKey, prefix.length);
-  input.set(keys.exchangePublicKey, prefix.length + 32);
+  input.set(keys.ratchetPublicKey, prefix.length + 32);
   const hash = crypto.sha256(input);
 
   let digits = "";

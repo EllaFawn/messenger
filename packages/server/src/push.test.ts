@@ -86,7 +86,7 @@ async function waitFor(condition: () => boolean, what: string): Promise<void> {
 function send(from: TestIdentity, to: TestIdentity): Promise<Response> {
   return signedFetch(server.url, from, "/messages", {
     method: "POST",
-    body: JSON.stringify(encodeEnvelope(to.userId, crypto.randomBytes(24), crypto.randomBytes(48))),
+    body: JSON.stringify(encodeEnvelope(to.userId, { type: 1, body: crypto.randomBytes(48) })),
     timestamp: Date.now(),
   });
 }
@@ -137,7 +137,7 @@ describe("push connection", () => {
     const events = record(await open(bob));
     const res = await signedFetch(server.url, alice, "/messages", {
       method: "POST",
-      body: JSON.stringify({ v: 1, to: bob.userId, nonce: "bad", ciphertext: "bad" }),
+      body: JSON.stringify({ v: 2, to: bob.userId, type: 1, ciphertext: "bad" }),
       timestamp: Date.now(),
     });
     expect(res.status).toBe(400);

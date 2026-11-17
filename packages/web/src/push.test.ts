@@ -33,7 +33,7 @@ beforeAll(async () => {
 beforeEach(() => {
   vi.useFakeTimers();
   FakeSocket.created = [];
-  me = createIdentity(NOW);
+  me = createIdentity(NOW).identity;
   newMessages = 0;
   connects = 0;
   stop = connectPush({
@@ -80,7 +80,7 @@ describe("buildPushUrl", () => {
     const url = decodeURIComponent(buildPushUrl(me, "ws://example.test/api", NOW));
     expect(url).not.toContain(crypto.toBase64(me.identityPrivateKey));
     expect(url).not.toContain(crypto.toBase64(me.identityPrivateKey.slice(0, 32)));
-    expect(url).not.toContain(crypto.toBase64(me.exchangePrivateKey));
+    expect(url).not.toContain(crypto.toBase64(me.pickleKey));
   });
 });
 

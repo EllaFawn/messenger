@@ -1,10 +1,12 @@
 import * as crypto from "@messager/crypto";
-import { signExchangeKey, verifyExchangeKey, verifyRequest } from "@messager/protocol";
+import { signOneTimeKey, signRatchetKey, verifyOneTimeKey, verifyRatchetKey, verifyRequest } from "@messager/protocol";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { createIdentity, type StoredIdentity } from "../identity.js";
+import { createIdentity as createIdentityWithAccount, type StoredIdentity } from "../identity.js";
 import { ApiError, createApiClient, type ApiClient } from "./client.js";
 
 const NOW = 1_800_000_000_000;
+
+const createIdentity = (now: number): StoredIdentity => createIdentityWithAccount(now).identity;
 
 interface SeenRequest {
   url: string;
@@ -102,7 +104,7 @@ describe("signed requests", () => {
   it("never sends private key material", async () => {
     await client.request(identity, "POST", "/messages", { hello: "world" });
     const everything = JSON.stringify([seen[0]!.url, [...seen[0]!.headers.entries()], seen[0]!.body]);
-    for (const secret of [identity.identityPrivateKey, identity.exchangePrivateKey]) {
+    for (const secret of [identity.identityPrivateKey, identity.pickleKey]) {
       expect(everything).not.toContain(crypto.toBase64(secret));
       expect(everything).not.toContain(crypto.toHex(secret));
     }
@@ -169,7 +171,7 @@ describe("signed requests", () => {
 });
 
 describe("register", () => {
-  it("posts the public keys and invite code, signed by the new identity", async () => {
+  it("posts the identity key, the signed ratchet key and the invite code, signed by the new identity", async () => {
     respond = () => json(201, { userID: identity.userId });
     await client.register(identity, "the-invite-code-0123456789");
 
@@ -180,16 +182,12 @@ describe("register", () => {
     expect(body).toEqual({
       userID: identity.userId,
       identity_pubkey: crypto.toBase64(identity.identityPublicKey),
-      exchange_pubkey: crypto.toBase64(identity.exchangePublicKey),
-      exchange_sig: body.exchange_sig,
+      ratchet_pubkey: crypto.toBase64(identity.ratchetPublicKey),
+      ratchet_sig: body.ratchet_sig,
       inviteCode: "the-invite-code-0123456789",
     });
     expect(
-      verifyExchangeKey(
-        identity.exchangePublicKey,
-        crypto.fromBase64(body.exchange_sig!),
-        identity.identityPublicKey,
-      ),
+      verifyRatchetKey(identity.ratchetPublicKey, crypto.fromBase64(body.ratchet_sig!), identity.identityPublicKey),
     ).toBe(true);
     expect(signatureIsValid(request, "/register")).toBe(true);
   });
@@ -208,74 +206,59 @@ describe("register", () => {
   });
 });
 
-describe("getPubkeys", () => {
-  function reply(of: StoredIdentity, overrides: Record<string, unknown> = {}): Response {
-    return json(200, {
-      userID: of.userId,
-      identity_pubkey: crypto.toBase64(of.identityPublicKey),
-      exchange_pubkey: crypto.toBase64(of.exchangePublicKey),
-      exchange_sig: crypto.toBase64(signExchangeKey(of.exchangePublicKey, of.identityPrivateKey)),
-      ...overrides,
-    });
-  }
+/** The keys part of a pubkeys or claim reply, as the real server sends it. */
+function keysReply(of: StoredIdentity, overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    userID: of.userId,
+    identity_pubkey: crypto.toBase64(of.identityPublicKey),
+    ratchet_pubkey: crypto.toBase64(of.ratchetPublicKey),
+    ratchet_sig: crypto.toBase64(signRatchetKey(of.ratchetPublicKey, of.identityPrivateKey)),
+    key_epoch: 1,
+    ...overrides,
+  };
+}
 
+/** Cases every keys reply must be refused for. Built lazily: the crypto library is not loaded at definition time. */
+const BAD_KEYS: [string, (bob: StoredIdentity, mallory: StoredIdentity) => Record<string, unknown>][] = [
+  ["an identity key that does not hash to the userID", (_b, m) => ({ identity_pubkey: crypto.toBase64(m.identityPublicKey) })],
+  ["a ratchet key swapped in by the server", (_b, m) => ({ ratchet_pubkey: crypto.toBase64(m.ratchetPublicKey) })],
+  [
+    "a ratchet key signed by a different identity",
+    (_b, m) => ({
+      ratchet_pubkey: crypto.toBase64(m.ratchetPublicKey),
+      ratchet_sig: crypto.toBase64(signRatchetKey(m.ratchetPublicKey, m.identityPrivateKey)),
+    }),
+  ],
+  ["a reply about a different user", (_b, m) => ({ userID: m.userId })],
+  ["a missing ratchet key", () => ({ ratchet_pubkey: undefined })],
+  ["a missing signature", () => ({ ratchet_sig: undefined })],
+  ["a signature of the wrong length", () => ({ ratchet_sig: "AAAA" })],
+  ["a ratchet key of the wrong length", () => ({ ratchet_pubkey: "AAAA" })],
+  ["a ratchet key that is not text", () => ({ ratchet_pubkey: 5 })],
+  ["an identity key that is not base64", () => ({ identity_pubkey: "!".repeat(44) })],
+  ["a missing key epoch", () => ({ key_epoch: undefined })],
+  ["a key epoch of zero", () => ({ key_epoch: 0 })],
+  ["a key epoch that is not a whole number", () => ({ key_epoch: 1.5 })],
+];
+
+describe("getPubkeys", () => {
   it("returns the keys as bytes and signs the request", async () => {
     const bob = createIdentity(NOW);
-    respond = () => reply(bob);
+    respond = () => json(200, keysReply(bob, { key_epoch: 3 }));
     const keys = await client.getPubkeys(identity, bob.userId);
-    expect(keys.userId).toBe(bob.userId);
-    expect(crypto.toHex(keys.identityPublicKey)).toBe(crypto.toHex(bob.identityPublicKey));
-    expect(crypto.toHex(keys.exchangePublicKey)).toBe(crypto.toHex(bob.exchangePublicKey));
+    expect(keys).toEqual({
+      userId: bob.userId,
+      identityPublicKey: bob.identityPublicKey,
+      ratchetPublicKey: bob.ratchetPublicKey,
+      keyEpoch: 3,
+    });
     expect(seen[0]!.url).toBe(`/api/users/${bob.userId}/pubkeys`);
     expect(signatureIsValid(seen[0]!, `/users/${bob.userId}/pubkeys`)).toBe(true);
   });
 
-  it("rejects an identity key that does not hash to the requested userID", async () => {
+  it.each(BAD_KEYS)("rejects %s", async (_name, overrides) => {
     const bob = createIdentity(NOW);
-    const mallory = createIdentity(NOW);
-    respond = () => reply(bob, { identity_pubkey: crypto.toBase64(mallory.identityPublicKey) });
-    const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
-    expect((error as ApiError).code).toBe("invalid_response");
-  });
-
-  it("rejects an exchange key swapped in by the server", async () => {
-    // The identity key and signature are genuine, but the exchange key is the attacker's.
-    const bob = createIdentity(NOW);
-    const mallory = createIdentity(NOW);
-    respond = () => reply(bob, { exchange_pubkey: crypto.toBase64(mallory.exchangePublicKey) });
-    const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
-    expect((error as ApiError).code).toBe("invalid_response");
-  });
-
-  it("rejects an exchange key signed by a different identity", async () => {
-    const bob = createIdentity(NOW);
-    const mallory = createIdentity(NOW);
-    respond = () =>
-      reply(bob, {
-        exchange_pubkey: crypto.toBase64(mallory.exchangePublicKey),
-        exchange_sig: crypto.toBase64(signExchangeKey(mallory.exchangePublicKey, mallory.identityPrivateKey)),
-      });
-    const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
-    expect((error as ApiError).code).toBe("invalid_response");
-  });
-
-  it("rejects a reply about a different user", async () => {
-    const bob = createIdentity(NOW);
-    respond = () => reply(createIdentity(NOW));
-    const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
-    expect((error as ApiError).code).toBe("invalid_response");
-  });
-
-  it.each([
-    ["a missing exchange key", { exchange_pubkey: undefined }],
-    ["a missing signature", { exchange_sig: undefined }],
-    ["a signature of the wrong length", { exchange_sig: "AAAA" }],
-    ["an exchange key of the wrong length", { exchange_pubkey: "AAAA" }],
-    ["an exchange key that is not text", { exchange_pubkey: 5 }],
-    ["an identity key that is not base64", { identity_pubkey: "!".repeat(44) }],
-  ])("rejects %s", async (_name, overrides) => {
-    const bob = createIdentity(NOW);
-    respond = () => reply(bob, overrides);
+    respond = () => json(200, keysReply(bob, overrides(bob, createIdentity(NOW))));
     const error = await client.getPubkeys(identity, bob.userId).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("invalid_response");
   });
@@ -288,6 +271,146 @@ describe("getPubkeys", () => {
   });
 });
 
+describe("one-time keys", () => {
+  function claimReply(
+    of: StoredIdentity,
+    oneTimeKey: Uint8Array,
+    overrides: Record<string, unknown> = {},
+    keyOverrides: Record<string, unknown> = {},
+  ): Response {
+    return json(200, {
+      ...keysReply(of),
+      one_time_key: {
+        id: "AAAAAAAAAAE",
+        key: crypto.toBase64(oneTimeKey),
+        sig: crypto.toBase64(signOneTimeKey(of.ratchetPublicKey, oneTimeKey, of.identityPrivateKey)),
+        fallback: false,
+        ...keyOverrides,
+      },
+      ...overrides,
+    });
+  }
+
+  it("claims a key with a signed POST and returns it checked", async () => {
+    const bob = createIdentity(NOW);
+    const oneTimeKey = crypto.randomBytes(32);
+    respond = () => claimReply(bob, oneTimeKey, {}, { fallback: true });
+    const claimed = await client.claimOneTimeKey(identity, bob.userId);
+    expect(claimed).toEqual({
+      userId: bob.userId,
+      identityPublicKey: bob.identityPublicKey,
+      ratchetPublicKey: bob.ratchetPublicKey,
+      keyEpoch: 1,
+      oneTimeKey,
+      fallback: true,
+    });
+    expect(seen[0]!.method).toBe("POST");
+    expect(seen[0]!.url).toBe(`/api/users/${bob.userId}/keys/claim`);
+    expect(signatureIsValid(seen[0]!, `/users/${bob.userId}/keys/claim`)).toBe(true);
+  });
+
+  it.each(BAD_KEYS)("rejects a claim with %s", async (_name, overrides) => {
+    const bob = createIdentity(NOW);
+    respond = () => claimReply(bob, crypto.randomBytes(32), overrides(bob, createIdentity(NOW)));
+    const error = await client.claimOneTimeKey(identity, bob.userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it.each([
+    ["a one-time key the server swapped in", () => ({ key: crypto.toBase64(crypto.randomBytes(32)) })],
+    ["a one-time key signed by someone else", () => ({ sig: crypto.toBase64(crypto.randomBytes(64)) })],
+    ["a one-time key of the wrong length", () => ({ key: "AAAA" })],
+    ["a missing fallback flag", () => ({ fallback: undefined })],
+  ])("rejects a claim with %s", async (_name, keyOverrides) => {
+    const bob = createIdentity(NOW);
+    respond = () => claimReply(bob, crypto.randomBytes(32), {}, keyOverrides());
+    const error = await client.claimOneTimeKey(identity, bob.userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("rejects a one-time key signed for a different ratchet key of the same user", async () => {
+    // A genuine signature by Bob, but tying the key to some other (older) ratchet key.
+    const bob = createIdentity(NOW);
+    const oneTimeKey = crypto.randomBytes(32);
+    const sig = signOneTimeKey(crypto.randomBytes(32), oneTimeKey, bob.identityPrivateKey);
+    respond = () => claimReply(bob, oneTimeKey, {}, { sig: crypto.toBase64(sig) });
+    const error = await client.claimOneTimeKey(identity, bob.userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("rejects a claim reply with no one-time key", async () => {
+    const bob = createIdentity(NOW);
+    respond = () => json(200, keysReply(bob));
+    const error = await client.claimOneTimeKey(identity, bob.userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("passes on 'no one-time keys'", async () => {
+    respond = () => json(409, { error: "no_one_time_keys" });
+    const error = await client.claimOneTimeKey(identity, createIdentity(NOW).userId).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("no_one_time_keys");
+  });
+
+  it("counts my keys", async () => {
+    respond = () => json(200, { count: 12, has_fallback: true });
+    expect(await client.countOneTimeKeys(identity)).toEqual({ count: 12, hasFallback: true });
+    expect(seen[0]!.url).toBe("/api/keys/count");
+    expect(signatureIsValid(seen[0]!, "/keys/count")).toBe(true);
+  });
+
+  it.each([
+    ["a negative count", { count: -1, has_fallback: false }],
+    ["a count that is text", { count: "3", has_fallback: false }],
+    ["no fallback flag", { count: 3 }],
+  ])("rejects a count reply with %s", async (_name, reply) => {
+    respond = () => json(200, reply);
+    const error = await client.countOneTimeKeys(identity).catch((e: unknown) => e);
+    expect((error as ApiError).code).toBe("invalid_response");
+  });
+
+  it("uploads keys and a fallback key, each signed together with my ratchet key", async () => {
+    respond = () => json(200, { count: 2, has_fallback: true });
+    const keys = [
+      { id: "AAAAAAAAAAA", key: crypto.randomBytes(32) },
+      { id: "AAAAAAAAAAE", key: crypto.randomBytes(32) },
+    ];
+    const fallback = { id: "AAAAAAAAAAI", key: crypto.randomBytes(32) };
+    expect(await client.uploadOneTimeKeys(identity, keys, fallback)).toEqual({ count: 2, hasFallback: true });
+
+    expect(seen[0]!.method).toBe("POST");
+    expect(seen[0]!.url).toBe("/api/keys/one-time");
+    expect(signatureIsValid(seen[0]!, "/keys/one-time")).toBe(true);
+    const body = JSON.parse(seen[0]!.body!) as {
+      keys: { id: string; key: string; sig: string }[];
+      fallback: { id: string; key: string; sig: string };
+    };
+    expect(body.keys.map((k) => k.id)).toEqual(["AAAAAAAAAAA", "AAAAAAAAAAE"]);
+    expect(body.fallback.id).toBe("fallback-AAAAAAAAAAI");
+    for (const [sent, original] of [...body.keys.map((k, i) => [k, keys[i]!] as const), [body.fallback, fallback] as const]) {
+      expect(sent.key).toBe(crypto.toBase64(original.key));
+      expect(
+        verifyOneTimeKey(identity.ratchetPublicKey, original.key, crypto.fromBase64(sent.sig), identity.identityPublicKey),
+      ).toBe(true);
+    }
+  });
+
+  it("labels the fallback key's id so it cannot clash with a one-time key's", async () => {
+    // The library numbers the two kinds separately: both first keys are "AAAAAAAAAAA".
+    respond = () => json(200, { count: 1, has_fallback: true });
+    const key = { id: "AAAAAAAAAAA", key: crypto.randomBytes(32) };
+    await client.uploadOneTimeKeys(identity, [key], { id: "AAAAAAAAAAA", key: crypto.randomBytes(32) });
+    const body = JSON.parse(seen[0]!.body!) as { keys: { id: string }[]; fallback: { id: string } };
+    expect(body.keys[0]!.id).toBe("AAAAAAAAAAA");
+    expect(body.fallback.id).toBe("fallback-AAAAAAAAAAA");
+  });
+
+  it("leaves out the fallback key when there is none to send", async () => {
+    respond = () => json(200, { count: 1, has_fallback: true });
+    await client.uploadOneTimeKeys(identity, [{ id: "AAAAAAAAAAA", key: crypto.randomBytes(32) }]);
+    expect(JSON.parse(seen[0]!.body!)).not.toHaveProperty("fallback");
+  });
+});
+
 describe("messages", () => {
   const MESSAGE_ID = "3f2b8c1e-5d4a-4b6f-9e7a-0c1d2e3f4a5b";
 
@@ -295,8 +418,8 @@ describe("messages", () => {
     return {
       message_id: MESSAGE_ID,
       from: createIdentity(NOW).userId,
-      v: 1,
-      nonce: crypto.toBase64(crypto.randomBytes(24)),
+      v: 2,
+      type: 0,
       ciphertext: crypto.toBase64(crypto.randomBytes(40)),
       created_at: "2027-01-15T08:00:00.000Z",
       cursor: `1800000000000000_${MESSAGE_ID}`,
@@ -306,9 +429,9 @@ describe("messages", () => {
 
   it("sends the envelope unchanged and returns the server's message id", async () => {
     const envelope = {
-      v: 1 as const,
+      v: 2 as const,
       to: createIdentity(NOW).userId,
-      nonce: crypto.toBase64(crypto.randomBytes(24)),
+      type: 1 as const,
       ciphertext: crypto.toBase64(crypto.randomBytes(40)),
     };
     respond = () => json(201, { message_id: MESSAGE_ID, created_at: "2027-01-15T08:00:00.000Z" });
@@ -321,24 +444,24 @@ describe("messages", () => {
 
   it("rejects a send reply without a proper message id", async () => {
     respond = () => json(201, { message_id: "nope" });
-    const envelope = { v: 1 as const, to: "x", nonce: "y", ciphertext: "z" };
+    const envelope = { v: 2 as const, to: "x", type: 1 as const, ciphertext: "z" };
     const error = await client.sendMessage(identity, envelope).catch((e: unknown) => e);
     expect((error as ApiError).code).toBe("invalid_response");
   });
 
   it("fetches the inbox and converts each entry", async () => {
     const entry = inboxEntry();
-    respond = () => json(200, [entry]);
-    expect(await client.fetchInbox(identity)).toEqual([
-      {
-        messageId: MESSAGE_ID,
-        from: entry.from,
-        nonce: entry.nonce,
-        ciphertext: entry.ciphertext,
-        createdAt: entry.created_at,
-        cursor: entry.cursor,
-      },
-    ]);
+    respond = () => json(200, [entry, { ...entry, type: 1 }]);
+    const items = await client.fetchInbox(identity);
+    expect(items[0]).toEqual({
+      messageId: MESSAGE_ID,
+      from: entry.from,
+      type: 0,
+      ciphertext: entry.ciphertext,
+      createdAt: entry.created_at,
+      cursor: entry.cursor,
+    });
+    expect(items[1]!.type).toBe(1);
     expect(seen[0]!.url).toBe("/api/messages/inbox");
     expect(signatureIsValid(seen[0]!, "/messages/inbox")).toBe(true);
   });
@@ -367,8 +490,9 @@ describe("messages", () => {
     ["a reply that is not a list", () => ({ not: "a list" }) as unknown],
     ["an entry with a bad message id", () => ([inboxEntry({ message_id: "../../x" })]) as unknown],
     ["an entry with a bad sender", () => ([inboxEntry({ from: "someone" })]) as unknown],
-    ["an entry with an unknown version", () => ([inboxEntry({ v: 2 })]) as unknown],
-    ["an entry with a nonce of the wrong length", () => ([inboxEntry({ nonce: "AAAA" })]) as unknown],
+    ["an entry in the retired version 1", () => ([inboxEntry({ v: 1 })]) as unknown],
+    ["an entry with no type", () => ([inboxEntry({ type: undefined })]) as unknown],
+    ["an entry with an unknown type", () => ([inboxEntry({ type: 2 })]) as unknown],
     ["an entry with an empty ciphertext", () => ([inboxEntry({ ciphertext: "" })]) as unknown],
     ["an entry whose ciphertext is not base64", () => ([inboxEntry({ ciphertext: "<script>" })]) as unknown],
     ["an entry with an oversized ciphertext", () => ([inboxEntry({ ciphertext: "A".repeat(64 * 1024 + 4) })]) as unknown],

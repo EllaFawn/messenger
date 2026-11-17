@@ -103,14 +103,14 @@ export function keysRouter(deps: AuthDeps): Router {
       }
       const caller = authenticatedUserId(res);
 
-      const owner = await deps.pool.query<{ identity_pubkey: Buffer; ratchet_pubkey: Buffer | null }>(
+      const owner = await deps.pool.query<{ identity_pubkey: Buffer; ratchet_pubkey: Buffer }>(
         "SELECT identity_pubkey, ratchet_pubkey FROM users WHERE user_id = $1",
         [caller],
       );
       const user = owner.rows[0];
-      if (user === undefined || user.ratchet_pubkey === null) {
-        // One-time keys are signed together with the ratchet key, so there must be one.
-        res.status(409).json({ error: "no_ratchet_key" });
+      if (user === undefined) {
+        // The account was removed after the signature was checked.
+        res.status(401).json({ error: "unauthorized" });
         return;
       }
 
@@ -185,12 +185,12 @@ export function keysRouter(deps: AuthDeps): Router {
 
       const found = await deps.pool.query<{
         identity_pubkey: Buffer;
-        ratchet_pubkey: Buffer | null;
-        ratchet_sig: Buffer | null;
+        ratchet_pubkey: Buffer;
+        ratchet_sig: Buffer;
         key_epoch: number;
       }>("SELECT identity_pubkey, ratchet_pubkey, ratchet_sig, key_epoch FROM users WHERE user_id = $1", [target]);
       const user = found.rows[0];
-      if (user === undefined || user.ratchet_pubkey === null || user.ratchet_sig === null) {
+      if (user === undefined) {
         res.status(404).json({ error: "not_found" });
         return;
       }

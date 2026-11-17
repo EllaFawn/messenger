@@ -12,6 +12,7 @@ export default defineConfig({
     alias: {
       "@messager/crypto": fileURLToPath(new URL("../crypto/src/index.ts", import.meta.url)),
       "@messager/protocol": fileURLToPath(new URL("../protocol/src/index.ts", import.meta.url)),
+      "@messager/ratchet": fileURLToPath(new URL("../ratchet/src/index.ts", import.meta.url)),
     },
   },
   server: {

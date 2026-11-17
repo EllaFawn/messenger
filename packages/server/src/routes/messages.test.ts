@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { decryptMessage, encodeEnvelope, encryptMessage, type Envelope } from "@messager/protocol";
+import { encodeEnvelope } from "@messager/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp, MAX_BODY_BYTES } from "../app.js";
 import { INBOX_PAGE_SIZE } from "./messages.js";
@@ -40,7 +40,7 @@ beforeEach(async () => {
 
 /** A well-formed envelope with random bytes standing in for real ciphertext. */
 function envelopeTo(to: string, ciphertextBytes = 64): Record<string, unknown> {
-  return { ...encodeEnvelope(to, crypto.randomBytes(24), crypto.randomBytes(ciphertextBytes)) };
+  return { ...encodeEnvelope(to, { type: 1, body: crypto.randomBytes(ciphertextBytes) }) };
 }
 
 function send(from: TestIdentity, body: unknown): Promise<Response> {
@@ -52,10 +52,10 @@ function send(from: TestIdentity, body: unknown): Promise<Response> {
 }
 
 async function storedMessages(): Promise<
-  { message_id: string; from_user_id: string; to_user_id: string; nonce: Buffer; ciphertext: Buffer }[]
+  { message_id: string; from_user_id: string; to_user_id: string; ciphertext: Buffer }[]
 > {
   const result = await db.pool.query(
-    "SELECT message_id, from_user_id, to_user_id, nonce, ciphertext FROM messages ORDER BY created_at",
+    "SELECT message_id, from_user_id, to_user_id, ciphertext FROM messages ORDER BY created_at",
   );
   return result.rows;
 }
@@ -76,7 +76,6 @@ describe("POST /messages", () => {
     expect(rows[0]!.message_id).toBe(json.message_id);
     expect(rows[0]!.from_user_id).toBe(alice.userId);
     expect(rows[0]!.to_user_id).toBe(bob.userId);
-    expect(rows[0]!.nonce.toString("base64")).toBe(envelope.nonce);
     expect(rows[0]!.ciphertext.toString("base64")).toBe(envelope.ciphertext);
   });
 
@@ -135,20 +134,17 @@ describe("POST /messages", () => {
 
   it.each([
     ["a missing version", (e: Record<string, unknown>) => ({ ...e, v: undefined })],
-    ["an unsupported version", (e: Record<string, unknown>) => ({ ...e, v: 2 })],
-    ["a version sent as text", (e: Record<string, unknown>) => ({ ...e, v: "1" })],
+    ["the retired version 1", (e: Record<string, unknown>) => ({ ...e, v: 1 })],
+    ["an unsupported version", (e: Record<string, unknown>) => ({ ...e, v: 3 })],
+    ["a version sent as text", (e: Record<string, unknown>) => ({ ...e, v: "2" })],
     ["a missing recipient", (e: Record<string, unknown>) => ({ ...e, to: undefined })],
     ["a malformed recipient", (e: Record<string, unknown>) => ({ ...e, to: "not-a-real-id" })],
-    ["a missing nonce", (e: Record<string, unknown>) => ({ ...e, nonce: undefined })],
-    [
-      "a nonce of the wrong length",
-      (e: Record<string, unknown>) => ({ ...e, nonce: crypto.toBase64(crypto.randomBytes(16)) }),
-    ],
-    ["a nonce that is not base64", (e: Record<string, unknown>) => ({ ...e, nonce: "!".repeat(32) })],
+    ["a missing type", (e: Record<string, unknown>) => ({ ...e, type: undefined })],
+    ["an unknown type", (e: Record<string, unknown>) => ({ ...e, type: 2 })],
     ["a missing ciphertext", (e: Record<string, unknown>) => ({ ...e, ciphertext: undefined })],
     ["an empty ciphertext", (e: Record<string, unknown>) => ({ ...e, ciphertext: "" })],
     [
-      "a ciphertext shorter than the authentication tag",
+      "a ciphertext too short to be genuine",
       (e: Record<string, unknown>) => ({ ...e, ciphertext: crypto.toBase64(crypto.randomBytes(15)) }),
     ],
     ["a ciphertext that is not base64", (e: Record<string, unknown>) => ({ ...e, ciphertext: "not base64!!" })],
@@ -175,7 +171,7 @@ describe("POST /messages", () => {
     expect(await storedMessages()).toHaveLength(0);
   });
 
-  it("accepts a ciphertext of exactly the authentication tag length", async () => {
+  it("accepts a ciphertext of exactly the minimum length", async () => {
     const res = await send(alice, envelopeTo(bob.userId, 16));
     expect(res.status).toBe(201);
   });
@@ -205,7 +201,7 @@ interface InboxItem {
   message_id: string;
   from: string;
   v: number;
-  nonce: string;
+  type: number;
   ciphertext: string;
   created_at: string;
   cursor: string;
@@ -220,10 +216,10 @@ async function inbox(who: TestIdentity): Promise<InboxItem[]> {
 /** Inserts a message directly, with a chosen age so ordering is predictable. */
 async function insertMessage(from: TestIdentity, to: TestIdentity, secondsAgo: number): Promise<string> {
   const result = await db.pool.query<{ message_id: string }>(
-    `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
+    `INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext, created_at)
      VALUES ($1, $2, $3, $4, now() - make_interval(secs => $5))
      RETURNING message_id`,
-    [from.userId, to.userId, Buffer.from(crypto.randomBytes(24)), Buffer.from(crypto.randomBytes(32)), secondsAgo],
+    [from.userId, to.userId, 1, Buffer.from(crypto.randomBytes(32)), secondsAgo],
   );
   return result.rows[0]!.message_id;
 }
@@ -242,37 +238,13 @@ describe("GET /messages/inbox", () => {
       {
         message_id: sent.message_id,
         from: alice.userId,
-        v: 1,
-        nonce: envelope.nonce,
+        v: 2,
+        type: 1,
         ciphertext: envelope.ciphertext,
         created_at: sent.created_at,
         cursor: expect.stringMatching(/^\d+_/),
       },
     ]);
-  });
-
-  it("delivers a message the recipient can decrypt", async () => {
-    const message = { counter: 1, text: "hello bob", sentAt: NOW };
-    const envelope = encryptMessage({
-      message,
-      fromUserId: alice.userId,
-      toUserId: bob.userId,
-      myExchangePrivateKey: alice.exchange.privateKey,
-      theirExchangePublicKey: bob.exchange.publicKey,
-    });
-    expect((await send(alice, envelope)).status).toBe(201);
-
-    const [item] = await inbox(bob);
-    const received: Envelope = { v: 1, to: bob.userId, nonce: item!.nonce, ciphertext: item!.ciphertext };
-    expect(
-      decryptMessage({
-        envelope: received,
-        fromUserId: item!.from,
-        toUserId: bob.userId,
-        myExchangePrivateKey: bob.exchange.privateKey,
-        theirExchangePublicKey: alice.exchange.publicKey,
-      }),
-    ).toEqual(message);
   });
 
   it("returns messages oldest first", async () => {
@@ -329,10 +301,10 @@ describe("GET /messages/inbox", () => {
   it("returns at most one page, starting with the oldest", async () => {
     const extra = 3;
     await db.pool.query(
-      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
+      `INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext, created_at)
        SELECT $1, $2, $3, $4, now() - make_interval(secs => n)
        FROM generate_series(1, $5::int) AS n`,
-      [alice.userId, bob.userId, Buffer.alloc(24), Buffer.alloc(16), INBOX_PAGE_SIZE + extra],
+      [alice.userId, bob.userId, 1, Buffer.alloc(16), INBOX_PAGE_SIZE + extra],
     );
 
     const items = await inbox(bob);
@@ -467,10 +439,10 @@ describe("POST /messages/:id/ack", () => {
 
   it("brings the next messages into view once a full page is acknowledged", async () => {
     await db.pool.query(
-      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, created_at)
+      `INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext, created_at)
        SELECT $1, $2, $3, $4, now() - make_interval(secs => n)
        FROM generate_series(1, $5::int) AS n`,
-      [alice.userId, bob.userId, Buffer.alloc(24), Buffer.alloc(16), INBOX_PAGE_SIZE + 2],
+      [alice.userId, bob.userId, 1, Buffer.alloc(16), INBOX_PAGE_SIZE + 2],
     );
     const firstPage = await inbox(bob);
     for (const item of firstPage) {

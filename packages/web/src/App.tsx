@@ -1,4 +1,5 @@
 import * as crypto from "@messager/crypto";
+import { initRatchet } from "@messager/ratchet";
 import { useEffect, useState, type FormEvent } from "react";
 import { createApiClient } from "./api/client.js";
 import { ContactsPanel } from "./ContactsPanel.js";
@@ -20,7 +21,8 @@ export function App() {
     let cancelled = false;
     let opened: IDBDatabase | undefined;
     (async () => {
-      await crypto.ready;
+      // The ratchet runs as WebAssembly, fetched from this same site.
+      await Promise.all([crypto.ready, initRatchet()]);
       const db = await openDatabase();
       opened = db;
       const session = await loadSession(db);

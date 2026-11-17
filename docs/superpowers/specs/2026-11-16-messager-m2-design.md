@@ -165,7 +165,7 @@ Signed statements stay domain-separated (`messager/v2/ratchet-key\n…`, `messag
 
 ### 5.5 Server changes
 
-Status: built (`feature/ratchet-server`), additively: static-key accounts and v1 messages keep working until the client has moved over, when a further migration makes the ratchet key required and removes the exchange key. As built:
+Status: built (`feature/ratchet-server`, then made the only scheme by `feature/ratchet-client`, migration 005). As built:
 
 - A one-time key's signature covers the owner's long-term ratchet key as well as the one-time key, so a server cannot pair an old one-time key with a newer ratchet account.
 - The server verifies every uploaded key's signature and refuses the whole upload if any fails.
@@ -207,6 +207,16 @@ POST /users/:userID/keys/claim → ratchet key + signature + one one-time key
 
 ### 5.6 Client changes
 
+Status: built (`feature/ratchet-client`). Details settled while building it:
+
+- The client keeps **50 one-time keys** on the server, the most the library hands out at once, and tops up when fewer than 25 remain: at start-up, after sign-up or re-registration, and after accepting a new session. The account is saved before an upload, so a key is never claimable before its private half is stored.
+- Fallback keys are uploaded with their id prefixed `fallback-`. The library numbers fallback and one-time keys separately, so the first of each share an id, and the server keeps one set of ids per user. Found by the end-to-end test.
+- A contact can have several sessions (for example when both sides start one at once). Sending uses the most recently used; receiving tries each. At most 10 are kept per contact.
+- One lock (the browser's Web Locks API, which covers every tab) guards the ratchet account and sessions, so two tabs never both advance the same state or decrypt the same message.
+- The session is saved **before** a message is sent, so a crash after sending can never make the next message reuse a key. If the send then fails, the recipient's ratchet simply skips that step.
+- The first message to a contact claims a one-time key, and the ratchet key in the claim must equal the pinned one; if it differs, the change is recorded and sending is blocked, as for a fetched key.
+- A message that decrypts but whose content is unusable is dropped, and the session is still saved, so both sides stay in step.
+
 - **Sending the first message:** claim a key for the contact, verify both signatures, create an outbound session, encrypt. The envelope becomes `{ "v": 2, "to", "type", "ciphertext" }`.
 - **Receiving a first message:** it creates the inbound session.
 - **Session state** lives in IndexedDB, one record per contact.
@@ -223,6 +233,8 @@ Consequences:
 **Pinning and safety numbers** carry over: the pinned key is now the ratchet account's long-term key, and the safety number covers the identity key and that key.
 
 ### 5.7 Migration
+
+Status: done. Server migration 005 removes accounts, messages and keys and drops the exchange key and nonce columns. Browser database version 4 removes contacts (they were pinned to static keys) and the counters, keeps the history (it reappears when a contact is added again), and gives the existing identity key a ratchet account, marked unregistered.
 
 A clean break. There are no real users, and no way to convert a static-key account without its private key. The migration removes existing accounts and messages, as migration 002 did; v1 envelopes and the static-ECDH code are deleted, not kept alongside. Browsers keep their identity key and register again.
 

@@ -13,6 +13,7 @@ import {
 } from "./contacts.js";
 import { Conversation } from "./Conversation.js";
 import type { StoredIdentity } from "./identity.js";
+import { topUpOneTimeKeys } from "./one-time-keys.js";
 import { connectPush } from "./push.js";
 import { describeError, isRejectedByServer, registerAgain } from "./session.js";
 import { listContacts } from "./storage/contact-store.js";
@@ -34,6 +35,13 @@ export function ContactsPanel({ db, client, me }: ContactsPanelProps) {
   const [unknownSenders, setUnknownSenders] = useState<string[]>([]);
   const [inboxError, setInboxError] = useState<string | null>(null);
   const [rejected, setRejected] = useState(false);
+
+  useEffect(() => {
+    // Keep enough one-time keys on the server for others to start conversations.
+    topUpOneTimeKeys({ db, client, me }).catch(() => {
+      // Offline or refused: tried again next time, and the inbox check reports the cause.
+    });
+  }, [db, client, me]);
 
   useEffect(() => {
     let cancelled = false;
@@ -272,7 +280,7 @@ interface ContactDetailsProps {
 
 function ContactDetails({ contact, me, onAccept, onReject }: ContactDetailsProps) {
   const safetyNumber = computeSafetyNumber(me, contact);
-  const changed = contact.changedExchangePublicKey;
+  const changed = contact.changedRatchetPublicKey;
 
   return (
     <>
@@ -294,7 +302,7 @@ function ContactDetails({ contact, me, onAccept, onReject }: ContactDetailsProps
           </p>
           <p>
             Safety number with the new key:{" "}
-            <code>{computeSafetyNumber(me, { ...contact, exchangePublicKey: changed })}</code>
+            <code>{computeSafetyNumber(me, { ...contact, ratchetPublicKey: changed })}</code>
           </p>
           <button type="button" onClick={onAccept}>
             Accept the new key

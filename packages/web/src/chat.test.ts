@@ -1,411 +1,403 @@
 import * as crypto from "@messager/crypto";
-import { encryptMessage, type Envelope } from "@messager/protocol";
+import { encodeEnvelope, encodeMessagePlaintext } from "@messager/protocol";
+import { MESSAGE_TYPE_NORMAL, MESSAGE_TYPE_PREKEY, preKeyMessageSessionId, RatchetSession } from "@messager/ratchet";
 import { IDBFactory } from "fake-indexeddb";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { ApiError, type ApiClient, type InboxItem } from "./api/client.js";
+import { beforeEach, describe, expect, it } from "vitest";
+import type { ApiClient } from "./api/client.js";
 import { MAX_TEXT_BYTES, receiveMessages, sendChatMessage } from "./chat.js";
-import { acceptChangedKey, addContact, recordFetchedKeys } from "./contacts.js";
-import { createIdentity, type StoredIdentity } from "./identity.js";
+import { acceptChangedKey, addContact, recordFetchedKeys, refreshContactKeys } from "./contacts.js";
+import { createRatchetAccount } from "./identity.js";
+import { getContact } from "./storage/contact-store.js";
 import { openDatabase } from "./storage/db.js";
+import { saveNewIdentity } from "./storage/identity-store.js";
 import { listMessages } from "./storage/message-store.js";
-
-const NOW = 1_800_000_000_000;
-
-/** A stand-in for the server: holds each user's waiting messages, exactly as the real one does. */
-class FakeServer {
-  users = new Map<string, StoredIdentity>();
-  inboxes = new Map<string, InboxItem[]>();
-  acked: string[] = [];
-  failSend = false;
-  failAck = false;
-  pageSize = 100;
-  inboxFetches = 0;
-  private nextId = 1;
-
-  register(who: StoredIdentity): void {
-    this.users.set(who.userId, who);
-    this.inboxes.set(who.userId, []);
-  }
-
-  /** Puts an envelope in the recipient's inbox as if `from` had sent it. */
-  deliver(from: string, envelope: Envelope): string {
-    const messageId = `00000000-0000-4000-8000-${String(this.nextId++).padStart(12, "0")}`;
-    this.inboxes.get(envelope.to)!.push({
-      messageId,
-      from,
-      nonce: envelope.nonce,
-      ciphertext: envelope.ciphertext,
-      createdAt: new Date(NOW).toISOString(),
-      cursor: `${this.nextId}_${messageId}`,
-    });
-    return messageId;
-  }
-
-  client(): ApiClient {
-    return {
-      request: async () => undefined,
-      register: async () => undefined,
-      getPubkeys: async (_me, userId) => {
-        const user = this.users.get(userId);
-        if (user === undefined) throw new ApiError(404, "not_found");
-        return {
-          userId,
-          identityPublicKey: user.identityPublicKey,
-          exchangePublicKey: user.exchangePublicKey,
-        };
-      },
-      sendMessage: async (me, envelope) => {
-        if (this.failSend) throw new ApiError(0, "network_error");
-        return { messageId: this.deliver(me.userId, envelope) };
-      },
-      fetchInbox: async (me, after) => {
-        this.inboxFetches += 1;
-        // Pages, like the real server: the items after the cursor, a few at a time.
-        const inbox = this.inboxes.get(me.userId)!;
-        const position = (item: InboxItem) => Number(item.cursor.split("_")[0]);
-        const from = after === undefined ? -1 : Number(after.split("_")[0]);
-        return inbox.filter((item) => position(item) > from).slice(0, this.pageSize);
-      },
-      ackMessage: async (me, messageId) => {
-        if (this.failAck) throw new ApiError(0, "network_error");
-        this.acked.push(messageId);
-        const inbox = this.inboxes.get(me.userId)!;
-        this.inboxes.set(
-          me.userId,
-          inbox.filter((item) => item.messageId !== messageId),
-        );
-      },
-    };
-  }
-}
+import { listSessions, saveSession } from "./storage/ratchet-store.js";
+import { FakeServer, newBrowser, NOW, type Browser } from "./test-fake-server.js";
 
 let server: FakeServer;
 let client: ApiClient;
-let alice: StoredIdentity;
-let bob: StoredIdentity;
-let aliceDb: IDBDatabase;
-let bobDb: IDBDatabase;
-
-beforeAll(async () => {
-  await crypto.ready;
-});
+let alice: Browser;
+let bob: Browser;
 
 beforeEach(async () => {
   server = new FakeServer();
   client = server.client();
-  alice = createIdentity(NOW);
-  bob = createIdentity(NOW);
-  server.register(alice);
-  server.register(bob);
-  aliceDb = await openDatabase(new IDBFactory());
-  bobDb = await openDatabase(new IDBFactory());
-  await addContact({ db: aliceDb, client, me: alice, userId: bob.userId, name: "Bob" });
-  await addContact({ db: bobDb, client, me: bob, userId: alice.userId, name: "Alice" });
+  alice = await newBrowser(server);
+  bob = await newBrowser(server);
+  await befriend(alice, bob);
 });
 
-const aliceSends = (text: string) =>
-  sendChatMessage({ db: aliceDb, client, me: alice, contactId: bob.userId, text, now: () => NOW });
-const bobReceives = () => receiveMessages({ db: bobDb, client, me: bob });
-const bobHistory = async () => (await listMessages(bobDb, alice.userId)).map((m) => m.text);
-const bobInbox = () => server.inboxes.get(bob.userId)!;
+async function befriend(a: Browser, b: Browser): Promise<void> {
+  await addContact({ db: a.db, client, me: a.me, userId: b.me.userId, name: "B" });
+  await addContact({ db: b.db, client, me: b.me, userId: a.me.userId, name: "A" });
+}
 
-/** An envelope encrypted by Alice for Bob with a chosen counter, bypassing her local counter. */
-function forgedFromAlice(counter: number, text: string, overrides: Partial<{ key: Uint8Array }> = {}): Envelope {
-  return encryptMessage({
-    message: { counter, text, sentAt: NOW },
-    fromUserId: alice.userId,
-    toUserId: bob.userId,
-    myExchangePrivateKey: alice.exchangePrivateKey,
-    theirExchangePublicKey: overrides.key ?? bob.exchangePublicKey,
-  });
+const send = (from: Browser, to: Browser, text: string) =>
+  sendChatMessage({ db: from.db, client, me: from.me, contactId: to.me.userId, text, now: () => NOW });
+const receive = (who: Browser) => receiveMessages({ db: who.db, client, me: who.me });
+const history = async (who: Browser, withWhom: Browser) =>
+  (await listMessages(who.db, withWhom.me.userId)).map((m) => `${m.direction}:${m.text}`);
+const inbox = (who: Browser) => server.inboxes.get(who.me.userId)!;
+const keysLeft = (who: Browser) => server.oneTimeKeys.get(who.me.userId)!.length;
+
+/** Encrypts arbitrary bytes on Alice's current session with Bob, as her app would but without its checks. */
+async function aliceEncryptsRaw(plaintext: Uint8Array) {
+  const [record] = await listSessions(alice.db, bob.me.userId);
+  const session = RatchetSession.restore(record!.pickle, alice.me.pickleKey);
+  const encrypted = session.encrypt(plaintext);
+  await saveSession(alice.db, { ...record!, pickle: session.save(alice.me.pickleKey) });
+  return encodeEnvelope(bob.me.userId, encrypted);
 }
 
 describe("sending", () => {
   it("delivers a message the recipient can read, and keeps a copy in the sender's history", async () => {
-    const sent = await aliceSends("hello bob");
-    expect(sent).toMatchObject({ direction: "out", text: "hello bob", counter: 1, sentAt: NOW });
-    expect((await listMessages(aliceDb, bob.userId)).map((m) => m.text)).toEqual(["hello bob"]);
+    const sent = await send(alice, bob, "hello bob");
+    expect(sent).toMatchObject({ direction: "out", text: "hello bob", sentAt: NOW });
+    expect(await history(alice, bob)).toEqual(["out:hello bob"]);
 
-    expect(await bobReceives()).toEqual({ stored: 1, dropped: 0, unknownSenders: [], heldForKeyChange: 0 });
-    const received = await listMessages(bobDb, alice.userId);
+    expect(await receive(bob)).toEqual({ stored: 1, dropped: 0, unknownSenders: [], heldForKeyChange: 0 });
+    const received = await listMessages(bob.db, alice.me.userId);
     expect(received).toHaveLength(1);
-    expect(received[0]).toMatchObject({ direction: "in", text: "hello bob", counter: 1, sentAt: NOW });
+    expect(received[0]).toMatchObject({ direction: "in", text: "hello bob", sentAt: NOW });
+  });
+
+  it("claims one of the recipient's one-time keys for the first message only", async () => {
+    expect(keysLeft(bob)).toBe(50);
+    await send(alice, bob, "one");
+    await send(alice, bob, "two");
+    expect(server.claims).toBe(1);
+    expect(keysLeft(bob)).toBe(49);
+    expect(await listSessions(alice.db, bob.me.userId)).toHaveLength(1);
+  });
+
+  it("sends pre-key messages until the other side replies, then normal ones", async () => {
+    await send(alice, bob, "one");
+    await send(alice, bob, "two");
+    expect(inbox(bob).map((item) => item.type)).toEqual([MESSAGE_TYPE_PREKEY, MESSAGE_TYPE_PREKEY]);
+    // Both belong to the same session.
+    const ids = inbox(bob).map((item) => preKeyMessageSessionId(crypto.fromBase64(item.ciphertext)));
+    expect(ids[0]).toBe(ids[1]);
+
+    await receive(bob);
+    await send(bob, alice, "got them");
+    expect(inbox(alice)[0]!.type).toBe(MESSAGE_TYPE_NORMAL);
+    await receive(alice);
+    await send(alice, bob, "three");
+    expect(inbox(bob)[0]!.type).toBe(MESSAGE_TYPE_NORMAL);
+    expect((await receive(bob)).stored).toBe(1);
+    expect(await history(bob, alice)).toEqual(["in:one", "in:two", "out:got them", "in:three"]);
+  });
+
+  it("encrypts every message differently, even the same text", async () => {
+    await send(alice, bob, "same");
+    await send(alice, bob, "same");
+    expect(inbox(bob)[0]!.ciphertext).not.toBe(inbox(bob)[1]!.ciphertext);
   });
 
   it("never puts the readable text on the server", async () => {
-    await aliceSends("a very secret plan");
-    const waiting = JSON.stringify(bobInbox());
+    await send(alice, bob, "a very secret plan");
+    const waiting = JSON.stringify(inbox(bob));
     expect(waiting).not.toContain("secret");
     // Not hidden inside the ciphertext bytes either.
-    const bytes = crypto.fromBase64(bobInbox()[0]!.ciphertext);
+    const bytes = crypto.fromBase64(inbox(bob)[0]!.ciphertext);
     expect(crypto.toHex(bytes)).not.toContain(crypto.toHex(crypto.utf8Encode("secret")));
   });
 
-  it("uses a higher counter for every message", async () => {
-    const counters = [await aliceSends("one"), await aliceSends("two"), await aliceSends("three")].map(
-      (m) => m.counter,
-    );
-    expect(counters).toEqual([1, 2, 3]);
-  });
-
-  it("does not reuse a counter after a failed send, and stores nothing for the failure", async () => {
+  it("stores nothing for a failed send, and the next message still gets through", async () => {
     server.failSend = true;
-    await expect(aliceSends("lost")).rejects.toThrow();
+    await expect(send(alice, bob, "lost")).rejects.toThrow();
+    expect(await history(alice, bob)).toEqual([]);
+
     server.failSend = false;
-    const next = await aliceSends("arrives");
-    expect(next.counter).toBe(2);
-    expect((await listMessages(aliceDb, bob.userId)).map((m) => m.text)).toEqual(["arrives"]);
+    await send(alice, bob, "next");
+    expect(await receive(bob)).toMatchObject({ stored: 1, dropped: 0 });
+    expect(await history(bob, alice)).toEqual(["in:next"]);
   });
 
-  it("keeps separate counters per contact", async () => {
-    const carol = createIdentity(NOW);
-    server.register(carol);
-    await addContact({ db: aliceDb, client, me: alice, userId: carol.userId });
-    await aliceSends("to bob");
-    const toCarol = await sendChatMessage({ db: aliceDb, client, me: alice, contactId: carol.userId, text: "hi" });
-    expect(toCarol.counter).toBe(1);
+  it("uses the fallback key once the one-time keys have run out", async () => {
+    server.oneTimeKeys.set(bob.me.userId, []);
+    await send(alice, bob, "via the fallback");
+    expect(await receive(bob)).toMatchObject({ stored: 1 });
+  });
+
+  it("explains when the recipient has published no keys at all", async () => {
+    server.oneTimeKeys.set(bob.me.userId, []);
+    server.fallbacks.delete(bob.me.userId);
+    await expect(send(alice, bob, "hello")).rejects.toMatchObject({ code: "no_one_time_keys" });
+    expect(await history(alice, bob)).toEqual([]);
+  });
+
+  it("refuses to start a session on a ratchet key other than the pinned one, and records the change", async () => {
+    // The server now vouches for a different key (validly signed, as far as the fake is concerned).
+    const swapped = createRatchetAccount().ratchetPublicKey;
+    server.users.set(bob.me.userId, { ...bob.me, ratchetPublicKey: swapped });
+
+    await expect(send(alice, bob, "hello")).rejects.toThrow(/key has changed/);
+    expect(inbox(bob)).toHaveLength(0);
+    const contact = (await getContact(alice.db, bob.me.userId))!;
+    expect(crypto.toHex(contact.changedRatchetPublicKey!)).toBe(crypto.toHex(swapped));
+    expect(crypto.toHex(contact.ratchetPublicKey)).toBe(crypto.toHex(bob.me.ratchetPublicKey));
   });
 
   it.each([[""], ["   \n"]])("refuses the empty message %j", async (text) => {
-    await expect(aliceSends(text)).rejects.toThrow(/Type a message/);
-    expect(bobInbox()).toHaveLength(0);
+    await expect(send(alice, bob, text)).rejects.toThrow(/type a message/i);
+    expect(inbox(bob)).toHaveLength(0);
   });
 
   it("refuses a message that is too long, counting bytes not characters", async () => {
-    await expect(aliceSends("é".repeat(MAX_TEXT_BYTES / 2 + 1))).rejects.toThrow(/too long/);
-    await aliceSends("é".repeat(MAX_TEXT_BYTES / 2));
-    expect(bobInbox()).toHaveLength(1);
+    await expect(send(alice, bob, "é".repeat(MAX_TEXT_BYTES / 2 + 1))).rejects.toThrow(/too long/);
+    await send(alice, bob, "é".repeat(MAX_TEXT_BYTES / 2));
+    expect((await receive(bob)).stored).toBe(1);
   });
 
   it("refuses to send to someone who is not a contact", async () => {
-    const stranger = createIdentity(NOW);
-    await expect(
-      sendChatMessage({ db: aliceDb, client, me: alice, contactId: stranger.userId, text: "hi" }),
-    ).rejects.toThrow(/No such contact/);
+    const carol = await newBrowser(server);
+    await expect(send(alice, carol, "hi")).rejects.toThrow(/no such contact/i);
+    expect(server.claims).toBe(0);
   });
 
   it("refuses to send while the contact's key change is unresolved", async () => {
-    await recordFetchedKeys(aliceDb, bob.userId, {
-      userId: bob.userId,
-      identityPublicKey: bob.identityPublicKey,
-      exchangePublicKey: createIdentity(NOW).exchangePublicKey,
+    await recordFetchedKeys(alice.db, bob.me.userId, {
+      userId: bob.me.userId,
+      identityPublicKey: bob.me.identityPublicKey,
+      ratchetPublicKey: createRatchetAccount().ratchetPublicKey,
+      keyEpoch: 2,
     });
-    await expect(aliceSends("hello")).rejects.toThrow(/blocked/);
-    expect(bobInbox()).toHaveLength(0);
+    await expect(send(alice, bob, "hi")).rejects.toThrow(/blocked/);
+    expect(inbox(bob)).toHaveLength(0);
   });
 
   it("keeps punctuation, emoji and markup exactly as typed", async () => {
-    const text = `<script>alert("x")</script> 👋 line1\nline2 "quotes" \\ back`;
-    await aliceSends(text);
-    await bobReceives();
-    expect(await bobHistory()).toEqual([text]);
+    const text = `<b>"quotes"</b> & 'apostrophes' — 🙂 \n new line \u0000`;
+    await send(alice, bob, text);
+    await receive(bob);
+    expect((await listMessages(bob.db, alice.me.userId))[0]!.text).toBe(text);
+  });
+
+  it("starts only one session when two tabs send the first message at once", async () => {
+    await Promise.all([send(alice, bob, "tab one"), send(alice, bob, "tab two")]);
+    expect(server.claims).toBe(1);
+    expect(await listSessions(alice.db, bob.me.userId)).toHaveLength(1);
+    expect((await receive(bob)).stored).toBe(2);
   });
 });
 
 describe("receiving", () => {
   it("acknowledges stored messages so the server deletes them", async () => {
-    await aliceSends("one");
-    await aliceSends("two");
-    await bobReceives();
-    expect(bobInbox()).toHaveLength(0);
+    await send(alice, bob, "one");
+    await send(alice, bob, "two");
+    await receive(bob);
     expect(server.acked).toHaveLength(2);
-    expect(await bobHistory()).toEqual(["one", "two"]);
+    expect(inbox(bob)).toEqual([]);
   });
 
   it("does nothing when the inbox is empty", async () => {
-    expect(await bobReceives()).toEqual({ stored: 0, dropped: 0, unknownSenders: [], heldForKeyChange: 0 });
+    expect(await receive(bob)).toEqual({ stored: 0, dropped: 0, unknownSenders: [], heldForKeyChange: 0 });
   });
 
   it("does not show a message twice when the acknowledgement was lost", async () => {
-    await aliceSends("only once");
+    await send(alice, bob, "once");
     server.failAck = true;
-    expect((await bobReceives()).stored).toBe(1);
-    expect(bobInbox()).toHaveLength(1);
+    expect((await receive(bob)).stored).toBe(1);
+    expect(inbox(bob)).toHaveLength(1);
 
     server.failAck = false;
-    expect(await bobReceives()).toMatchObject({ stored: 0, dropped: 1 });
-    expect(await bobHistory()).toEqual(["only once"]);
-    expect(bobInbox()).toHaveLength(0);
+    // Its key is gone, so the repeat no longer decrypts and is dropped.
+    expect(await receive(bob)).toMatchObject({ stored: 0, dropped: 1 });
+    expect(await history(bob, alice)).toEqual(["in:once"]);
+    expect(inbox(bob)).toEqual([]);
   });
 
   it("rejects a message replayed by the server", async () => {
-    await aliceSends("pay 10");
-    const original = { ...bobInbox()[0]! };
-    await bobReceives();
-
-    // The server puts the very same ciphertext back, under a new id.
-    bobInbox().push({ ...original, messageId: "00000000-0000-4000-8000-999999999999" });
-    expect(await bobReceives()).toMatchObject({ stored: 0, dropped: 1 });
-    expect(await bobHistory()).toEqual(["pay 10"]);
+    await send(alice, bob, "transfer 10");
+    const copy = { ...inbox(bob)[0]! };
+    await receive(bob);
+    server.deliver(alice.me.userId, { v: 2, to: bob.me.userId, type: copy.type, ciphertext: copy.ciphertext });
+    expect(await receive(bob)).toMatchObject({ stored: 0, dropped: 1 });
+    expect(await history(bob, alice)).toEqual(["in:transfer 10"]);
   });
 
-  it("rejects an older message delivered after a newer one", async () => {
-    server.deliver(alice.userId, forgedFromAlice(5, "newer"));
-    await bobReceives();
-    server.deliver(alice.userId, forgedFromAlice(3, "older, held back by the server"));
-    expect(await bobReceives()).toMatchObject({ stored: 0, dropped: 1 });
-    expect(await bobHistory()).toEqual(["newer"]);
+  it("reads repeated pre-key messages on the one session they belong to", async () => {
+    for (const text of ["one", "two", "three"]) await send(alice, bob, text);
+    expect((await receive(bob)).stored).toBe(3);
+    expect(await listSessions(bob.db, alice.me.userId)).toHaveLength(1);
   });
 
-  it("accepts counters with gaps", async () => {
-    server.deliver(alice.userId, forgedFromAlice(2, "two"));
-    server.deliver(alice.userId, forgedFromAlice(7, "seven"));
-    expect((await bobReceives()).stored).toBe(2);
+  it("reads messages that arrive out of order", async () => {
+    await send(alice, bob, "start");
+    await receive(bob);
+    await send(bob, alice, "ok");
+    await receive(alice);
+    await send(alice, bob, "first");
+    await send(alice, bob, "second");
+    inbox(bob).reverse();
+    expect((await receive(bob)).stored).toBe(2);
+    expect(await history(bob, alice)).toEqual(["in:start", "out:ok", "in:second", "in:first"]);
   });
 
-  it("drops a message whose ciphertext was altered", async () => {
-    await aliceSends("hello");
-    const item = bobInbox()[0]!;
+  it("drops a message whose ciphertext was altered, and still reads the next one", async () => {
+    await send(alice, bob, "original");
+    const item = inbox(bob)[0]!;
     const bytes = crypto.fromBase64(item.ciphertext);
-    bytes[0]! ^= 1;
+    bytes[bytes.length - 1]! ^= 1;
     item.ciphertext = crypto.toBase64(bytes);
 
-    expect(await bobReceives()).toMatchObject({ stored: 0, dropped: 1 });
-    expect(await bobHistory()).toEqual([]);
-    expect(bobInbox()).toHaveLength(0);
+    expect(await receive(bob)).toMatchObject({ stored: 0, dropped: 1 });
+    await send(alice, bob, "next");
+    expect((await receive(bob)).stored).toBe(1);
+    expect(await history(bob, alice)).toEqual(["in:next"]);
   });
 
   it("drops a message the server attributes to the wrong contact", async () => {
-    const carol = createIdentity(NOW);
-    server.register(carol);
-    await addContact({ db: bobDb, client, me: bob, userId: carol.userId, name: "Carol" });
-    // Really from Alice, but the server claims Carol sent it.
-    server.deliver(carol.userId, forgedFromAlice(1, "I am Carol, honest"));
+    const carol = await newBrowser(server);
+    await befriend(carol, bob);
+    await send(alice, bob, "from alice");
+    inbox(bob)[0]!.from = carol.me.userId;
 
-    expect(await bobReceives()).toMatchObject({ stored: 0, dropped: 1 });
-    expect(await listMessages(bobDb, carol.userId)).toEqual([]);
+    expect(await receive(bob)).toMatchObject({ stored: 0, dropped: 1 });
+    expect(await history(bob, carol)).toEqual([]);
+    expect(await history(bob, alice)).toEqual([]);
   });
 
   it("drops a message that was encrypted for somebody else", async () => {
-    const carol = createIdentity(NOW);
-    server.deliver(alice.userId, { ...forgedFromAlice(1, "for carol", { key: carol.exchangePublicKey }) });
-    expect(await bobReceives()).toMatchObject({ stored: 0, dropped: 1 });
+    const carol = await newBrowser(server);
+    await befriend(alice, carol);
+    await befriend(carol, bob);
+    await send(alice, carol, "for carol");
+    // The server moves it into Bob's inbox.
+    const moved = server.inboxes.get(carol.me.userId)!.pop()!;
+    inbox(bob).push(moved);
+    expect(await receive(bob)).toMatchObject({ stored: 0, dropped: 1 });
   });
 
   it.each([
-    ["a counter of zero", 0],
-    ["a negative counter", -4],
-    ["a fractional counter", 1.5],
-    ["a counter too large to count safely", 2 ** 60],
-  ])("drops a message with %s", async (_name, counter) => {
-    server.deliver(alice.userId, forgedFromAlice(counter, "bad counter"));
-    expect(await bobReceives()).toMatchObject({ stored: 0, dropped: 1 });
-    // A bad counter must not poison the real sequence.
-    server.deliver(alice.userId, forgedFromAlice(1, "fine"));
-    expect((await bobReceives()).stored).toBe(1);
+    ["is not JSON", () => crypto.utf8Encode("not json")],
+    ["has no text", () => crypto.utf8Encode(JSON.stringify({ sentAt: NOW }))],
+    ["is too long", () => encodeMessagePlaintext({ text: "x".repeat(MAX_TEXT_BYTES + 1), sentAt: NOW })],
+  ])("drops a message whose decrypted content %s, but stays in step with the sender", async (_name, content) => {
+    await send(alice, bob, "hello");
+    inbox(bob).length = 0;
+    server.deliver(alice.me.userId, await aliceEncryptsRaw(content()));
+    expect(await receive(bob)).toMatchObject({ stored: 0, dropped: 1 });
+
+    await send(alice, bob, "after");
+    expect((await receive(bob)).stored).toBe(1);
+    expect(await history(bob, alice)).toEqual(["in:after"]);
   });
 
   it("leaves messages from unknown senders on the server and reports who they are from", async () => {
-    const stranger = createIdentity(NOW);
-    server.register(stranger);
-    await sendChatMessage({
-      db: await (async () => {
-        const db = await openDatabase(new IDBFactory());
-        await addContact({ db, client, me: stranger, userId: bob.userId });
-        return db;
-      })(),
-      client,
-      me: stranger,
-      contactId: bob.userId,
-      text: "hello from a stranger",
-    });
+    const carol = await newBrowser(server);
+    await addContact({ db: carol.db, client, me: carol.me, userId: bob.me.userId });
+    await sendChatMessage({ db: carol.db, client, me: carol.me, contactId: bob.me.userId, text: "hi", now: () => NOW });
+    await sendChatMessage({ db: carol.db, client, me: carol.me, contactId: bob.me.userId, text: "hi?", now: () => NOW });
 
-    expect(await bobReceives()).toEqual({
-      stored: 0,
-      dropped: 0,
-      unknownSenders: [stranger.userId],
-      heldForKeyChange: 0,
-    });
-    expect(bobInbox()).toHaveLength(1);
+    expect(await receive(bob)).toEqual({ stored: 0, dropped: 0, unknownSenders: [carol.me.userId], heldForKeyChange: 0 });
+    expect(inbox(bob)).toHaveLength(2);
 
-    // Once Bob adds them, the waiting message arrives.
-    await addContact({ db: bobDb, client, me: bob, userId: stranger.userId });
-    expect((await bobReceives()).stored).toBe(1);
-    expect((await listMessages(bobDb, stranger.userId)).map((m) => m.text)).toEqual(["hello from a stranger"]);
+    await addContact({ db: bob.db, client, me: bob.me, userId: carol.me.userId });
+    expect((await receive(bob)).stored).toBe(2);
   });
 
-  it("holds an undecryptable message while a key change is unresolved, then reads it once accepted", async () => {
-    const newKeys = crypto.generateExchangeKeyPair();
-    // Alice now encrypts with her new key; Bob still has the old one pinned.
-    server.deliver(
-      alice.userId,
-      encryptMessage({
-        message: { counter: 1, text: "sent with my new key", sentAt: NOW },
-        fromUserId: alice.userId,
-        toUserId: bob.userId,
-        myExchangePrivateKey: newKeys.privateKey,
-        theirExchangePublicKey: bob.exchangePublicKey,
-      }),
-    );
-    await recordFetchedKeys(bobDb, alice.userId, {
-      userId: alice.userId,
-      identityPublicKey: alice.identityPublicKey,
-      exchangePublicKey: newKeys.publicKey,
-    });
+  it("tops up its one-time keys after someone starts a conversation", async () => {
+    await send(alice, bob, "hi");
+    expect(keysLeft(bob)).toBe(49);
+    await receive(bob);
+    // Above the top-up threshold, so nothing is uploaded yet...
+    expect(keysLeft(bob)).toBe(49);
 
-    expect(await bobReceives()).toMatchObject({ stored: 0, dropped: 0, heldForKeyChange: 1 });
-    expect(bobInbox()).toHaveLength(1);
+    // ...but once the supply runs low it is refilled.
+    server.oneTimeKeys.get(bob.me.userId)!.splice(0, 30);
+    const carol = await newBrowser(server);
+    await befriend(carol, bob);
+    await sendChatMessage({ db: carol.db, client, me: carol.me, contactId: bob.me.userId, text: "hey", now: () => NOW });
+    await receive(bob);
+    expect(keysLeft(bob)).toBe(50);
+  });
 
-    await acceptChangedKey(bobDb, alice.userId);
-    expect((await bobReceives()).stored).toBe(1);
-    expect(await bobHistory()).toEqual(["sent with my new key"]);
+  it("holds a message from a contact's new key until the user accepts it, then reads it", async () => {
+    // Alice's browser data is lost; she restores her identity key but has a new ratchet account.
+    const restoredDb = await openDatabase(new IDBFactory());
+    const fresh = createRatchetAccount();
+    const restored = { ...alice.me, ratchetPublicKey: fresh.ratchetPublicKey, pickleKey: fresh.pickleKey };
+    await saveNewIdentity(restoredDb, restored, fresh.accountPickle);
+    server.users.set(alice.me.userId, restored);
+    await addContact({ db: restoredDb, client, me: restored, userId: bob.me.userId });
+    await sendChatMessage({ db: restoredDb, client, me: restored, contactId: bob.me.userId, text: "it's me", now: () => NOW });
+
+    // Bob's app notices the new key; until he decides, the message cannot be read and is kept on the server.
+    await refreshContactKeys(bob.db, client, bob.me, alice.me.userId);
+    expect(await receive(bob)).toMatchObject({ stored: 0, heldForKeyChange: 1 });
+    expect(inbox(bob)).toHaveLength(1);
+
+    await acceptChangedKey(bob.db, alice.me.userId);
+    expect(await receive(bob)).toMatchObject({ stored: 1, heldForKeyChange: 0 });
+    expect(await history(bob, alice)).toEqual(["in:it's me"]);
   });
 
   it("keeps the two directions of a conversation in order", async () => {
-    await aliceSends("hi bob");
-    await bobReceives();
-    await sendChatMessage({ db: bobDb, client, me: bob, contactId: alice.userId, text: "hi alice", now: () => NOW });
-    await receiveMessages({ db: aliceDb, client, me: alice });
+    await send(alice, bob, "1");
+    await receive(bob);
+    await send(bob, alice, "2");
+    await receive(alice);
+    await send(alice, bob, "3");
+    await receive(bob);
+    expect(await history(alice, bob)).toEqual(["out:1", "in:2", "out:3"]);
+    expect(await history(bob, alice)).toEqual(["in:1", "out:2", "in:3"]);
+  });
 
-    expect((await listMessages(bobDb, alice.userId)).map((m) => [m.direction, m.text])).toEqual([
-      ["in", "hi bob"],
-      ["out", "hi alice"],
-    ]);
-    expect((await listMessages(aliceDb, bob.userId)).map((m) => [m.direction, m.text])).toEqual([
-      ["out", "hi bob"],
-      ["in", "hi alice"],
+  it("works when both people start a conversation at the same moment", async () => {
+    await send(alice, bob, "hi bob");
+    await send(bob, alice, "hi alice");
+    expect((await receive(alice)).stored).toBe(1);
+    expect((await receive(bob)).stored).toBe(1);
+
+    for (let round = 0; round < 3; round++) {
+      await send(alice, bob, `a${round}`);
+      await send(bob, alice, `b${round}`);
+      expect((await receive(alice)).stored).toBe(1);
+      expect((await receive(bob)).stored).toBe(1);
+    }
+    expect(await history(bob, alice)).toEqual([
+      "out:hi alice",
+      "in:hi bob",
+      // Each round Bob sends before he checks his inbox.
+      "out:b0",
+      "in:a0",
+      "out:b1",
+      "in:a1",
+      "out:b2",
+      "in:a2",
     ]);
   });
 
   it("does not store a message twice when two tabs receive at the same moment", async () => {
-    await aliceSends("once");
-    const [a, b] = await Promise.all([bobReceives(), bobReceives()]);
-    expect(a.stored + b.stored).toBe(1);
-    expect(await bobHistory()).toEqual(["once"]);
+    await send(alice, bob, "once");
+    const results = await Promise.all([receive(bob), receive(bob)]);
+    expect(results[0]!.stored + results[1]!.stored).toBe(1);
+    expect(await history(bob, alice)).toEqual(["in:once"]);
   });
 });
 
 describe("paging through the inbox", () => {
   it("collects every waiting message, however many pages it takes", async () => {
     server.pageSize = 2;
-    for (let i = 1; i <= 7; i++) await aliceSends(`message ${i}`);
-    expect(await bobReceives()).toMatchObject({ stored: 7, dropped: 0 });
-    expect(await bobHistory()).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `message ${i}`));
-    expect(bobInbox()).toHaveLength(0);
+    for (let i = 1; i <= 5; i++) await send(alice, bob, `m${i}`);
+    expect((await receive(bob)).stored).toBe(5);
+    expect(await history(bob, alice)).toEqual(["in:m1", "in:m2", "in:m3", "in:m4", "in:m5"]);
   });
 
   it("is not held up by a page full of messages it has to leave on the server", async () => {
-    server.pageSize = 2;
-    const stranger = createIdentity(NOW);
-    server.register(stranger);
-    for (let i = 0; i < 5; i++) {
-      server.deliver(
-        stranger.userId,
-        encryptMessage({
-          message: { counter: i + 1, text: "from a stranger", sentAt: NOW },
-          fromUserId: stranger.userId,
-          toUserId: bob.userId,
-          myExchangePrivateKey: stranger.exchangePrivateKey,
-          theirExchangePublicKey: bob.exchangePublicKey,
-        }),
-      );
+    server.pageSize = 3;
+    const stranger = await newBrowser(server);
+    await addContact({ db: stranger.db, client, me: stranger.me, userId: bob.me.userId });
+    for (let i = 0; i < 4; i++) {
+      await sendChatMessage({ db: stranger.db, client, me: stranger.me, contactId: bob.me.userId, text: `s${i}`, now: () => NOW });
     }
-    await aliceSends("this must still arrive");
+    await send(alice, bob, "behind the queue");
 
-    expect(await bobReceives()).toMatchObject({ stored: 1, unknownSenders: [stranger.userId] });
-    expect(await bobHistory()).toEqual(["this must still arrive"]);
-    // The stranger's messages are still waiting.
-    expect(bobInbox()).toHaveLength(5);
+    expect(await receive(bob)).toMatchObject({ stored: 1, unknownSenders: [stranger.me.userId] });
+    expect(await history(bob, alice)).toEqual(["in:behind the queue"]);
+    expect(inbox(bob)).toHaveLength(4);
   });
 
   it("stops after a bounded number of pages if a server never runs out", async () => {
@@ -416,17 +408,16 @@ describe("paging through the inbox", () => {
         return [
           {
             messageId: "00000000-0000-4000-8000-000000000001",
-            from: createIdentity(NOW).userId,
-            nonce: crypto.toBase64(crypto.randomBytes(24)),
-            ciphertext: crypto.toBase64(crypto.randomBytes(32)),
+            from: "x".repeat(43),
+            type: 1,
+            ciphertext: "AAAA",
             createdAt: new Date(NOW).toISOString(),
             cursor: "1_00000000-0000-4000-8000-000000000001",
           },
         ];
       },
     };
-    const result = await receiveMessages({ db: bobDb, client: endless, me: bob });
-    expect(result.stored).toBe(0);
+    await receiveMessages({ db: bob.db, client: endless, me: bob.me });
     expect(server.inboxFetches).toBe(200);
   });
 });

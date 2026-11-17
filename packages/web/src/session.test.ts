@@ -12,6 +12,9 @@ const NOW = 1_800_000_000_000;
 let db: IDBDatabase;
 let registerCalls: { identity: StoredIdentity; inviteCode: string }[];
 let registerResult: () => void;
+/** One-time keys the fake server holds for the identity under test. */
+let uploaded: number;
+let uploadFails: boolean;
 let client: ApiClient;
 
 beforeAll(async () => {
@@ -22,6 +25,8 @@ beforeEach(async () => {
   db = await openDatabase(new IDBFactory());
   registerCalls = [];
   registerResult = () => undefined;
+  uploaded = 0;
+  uploadFails = false;
   client = {
     request: async () => undefined,
     sendMessage: async () => {
@@ -31,6 +36,15 @@ beforeEach(async () => {
     ackMessage: async () => undefined,
     getPubkeys: async () => {
       throw new Error("not used");
+    },
+    claimOneTimeKey: async () => {
+      throw new Error("not used");
+    },
+    countOneTimeKeys: async () => ({ count: uploaded, hasFallback: uploaded > 0 }),
+    uploadOneTimeKeys: async (_identity, keys) => {
+      if (uploadFails) throw new ApiError(0, "network_error");
+      uploaded += keys.length;
+      return { count: uploaded, hasFallback: true };
     },
     register: async (identity, inviteCode) => {
       registerCalls.push({ identity, inviteCode });
@@ -61,6 +75,24 @@ describe("signUp", () => {
     expect(reloaded.status === "registered" && reloaded.identity.userId).toBe(stored!.userId);
   });
 
+  it("publishes one-time keys once registered, so others can start conversations", async () => {
+    await signUp({ db, client, inviteCode: "code", now: () => NOW });
+    expect(uploaded).toBe(50);
+  });
+
+  it("still completes sign-up if publishing the keys fails; they are published later", async () => {
+    uploadFails = true;
+    const session = await signUp({ db, client, inviteCode: "code", now: () => NOW });
+    expect(session.status).toBe("registered");
+    expect(uploaded).toBe(0);
+  });
+
+  it("registers the identity's own ratchet key", async () => {
+    await signUp({ db, client, inviteCode: "code", now: () => NOW });
+    const stored = await loadIdentity(db);
+    expect(crypto.toHex(registerCalls[0]!.identity.ratchetPublicKey)).toBe(crypto.toHex(stored!.ratchetPublicKey));
+  });
+
   it("stores the keys before contacting the server", async () => {
     let storedAtCallTime: StoredIdentity | null = null;
     client.register = async () => {
@@ -88,6 +120,8 @@ describe("signUp", () => {
     };
     await signUp({ db, client, inviteCode: "wrong", now: () => NOW }).catch(() => undefined);
     registerResult = () => undefined;
+  uploaded = 0;
+  uploadFails = false;
     const session = await signUp({ db, client, inviteCode: "right", now: () => NOW });
 
     expect(session.status).toBe("registered");
@@ -171,6 +205,14 @@ describe("registerAgain", () => {
     );
     // Still the same single identity in storage.
     expect((await loadIdentity(db))!.userId).toBe(registerCalls[0]!.identity.userId);
+  });
+
+  it("publishes fresh one-time keys after registering again", async () => {
+    await signUp({ db, client, inviteCode: "code", now: () => NOW });
+    // The server lost its copies along with the account.
+    uploaded = 0;
+    expect(await registerAgain({ db, client, inviteCode: "another" })).toBe("registered");
+    expect(uploaded).toBe(50);
   });
 
   it("reports when the server already knows the identity", async () => {

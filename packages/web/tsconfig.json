@@ -20,6 +20,9 @@
     },
     {
       "path": "../protocol"
+    },
+    {
+      "path": "../ratchet"
     }
   ]
 }

@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { deriveUserId, verifyExchangeKey, verifyRatchetKey } from "@messager/protocol";
+import { deriveUserId, verifyRatchetKey } from "@messager/protocol";
 import { Router } from "express";
 import {
   parseSignedHeaders,
@@ -22,11 +22,9 @@ const MAX_INVITE_CODE_LENGTH = 256;
 interface RegistrationBody {
   userID: string;
   identity_pubkey: string;
-  exchange_pubkey: string;
-  exchange_sig: string;
-  /** Optional until the static exchange key is retired: the long-term ratchet key and its signature. */
-  ratchet_pubkey: string | null;
-  ratchet_sig: string | null;
+  /** The long-term ratchet key, and the identity key's signature over it. */
+  ratchet_pubkey: string;
+  ratchet_sig: string;
   inviteCode: string;
 }
 
@@ -34,43 +32,23 @@ function parseRegistrationBody(body: unknown): RegistrationBody | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return null;
   }
-  const { userID, identity_pubkey, exchange_pubkey, exchange_sig, ratchet_pubkey, ratchet_sig, inviteCode } =
-    body as Record<string, unknown>;
-  // Both or neither.
-  const hasRatchet = ratchet_pubkey !== undefined || ratchet_sig !== undefined;
-  if (
-    hasRatchet &&
-    (typeof ratchet_pubkey !== "string" ||
-      typeof ratchet_sig !== "string" ||
-      !KEY_PATTERN.test(ratchet_pubkey) ||
-      !SIGNATURE_PATTERN.test(ratchet_sig))
-  ) {
-    return null;
-  }
+  const { userID, identity_pubkey, ratchet_pubkey, ratchet_sig, inviteCode } = body as Record<string, unknown>;
   if (
     typeof userID !== "string" ||
     typeof identity_pubkey !== "string" ||
-    typeof exchange_pubkey !== "string" ||
-    typeof exchange_sig !== "string" ||
+    typeof ratchet_pubkey !== "string" ||
+    typeof ratchet_sig !== "string" ||
     typeof inviteCode !== "string" ||
     !USER_ID_PATTERN.test(userID) ||
     !KEY_PATTERN.test(identity_pubkey) ||
-    !KEY_PATTERN.test(exchange_pubkey) ||
-    !SIGNATURE_PATTERN.test(exchange_sig) ||
+    !KEY_PATTERN.test(ratchet_pubkey) ||
+    !SIGNATURE_PATTERN.test(ratchet_sig) ||
     inviteCode.length === 0 ||
     inviteCode.length > MAX_INVITE_CODE_LENGTH
   ) {
     return null;
   }
-  return {
-    userID,
-    identity_pubkey,
-    exchange_pubkey,
-    exchange_sig,
-    ratchet_pubkey: hasRatchet ? (ratchet_pubkey as string) : null,
-    ratchet_sig: hasRatchet ? (ratchet_sig as string) : null,
-    inviteCode,
-  };
+  return { userID, identity_pubkey, ratchet_pubkey, ratchet_sig, inviteCode };
 }
 
 export function registerRouter(deps: AuthDeps): Router {
@@ -85,20 +63,15 @@ export function registerRouter(deps: AuthDeps): Router {
 
     await crypto.ready;
     const identityPublicKey = crypto.fromBase64(body.identity_pubkey);
-    const exchangePublicKey = crypto.fromBase64(body.exchange_pubkey);
-    const exchangeSignature = crypto.fromBase64(body.exchange_sig);
+    const ratchetPublicKey = crypto.fromBase64(body.ratchet_pubkey);
+    const ratchetSignature = crypto.fromBase64(body.ratchet_sig);
 
     // 1. The userID must be derived from the identity key being registered,
-    //    and that identity key must vouch for the exchange key. Other clients
+    //    and that identity key must vouch for the ratchet key. Other clients
     //    check the same signature, so a bad one is refused rather than stored.
-    const ratchetPublicKey = body.ratchet_pubkey === null ? null : crypto.fromBase64(body.ratchet_pubkey);
-    const ratchetSignature = body.ratchet_sig === null ? null : crypto.fromBase64(body.ratchet_sig);
     if (
       deriveUserId(identityPublicKey) !== body.userID ||
-      !verifyExchangeKey(exchangePublicKey, exchangeSignature, identityPublicKey) ||
-      (ratchetPublicKey !== null &&
-        ratchetSignature !== null &&
-        !verifyRatchetKey(ratchetPublicKey, ratchetSignature, identityPublicKey))
+      !verifyRatchetKey(ratchetPublicKey, ratchetSignature, identityPublicKey)
     ) {
       res.status(400).json({ error: "invalid_request" });
       return;
@@ -138,17 +111,10 @@ export function registerRouter(deps: AuthDeps): Router {
 
       // Existing users are never overwritten, so stored keys cannot be replaced.
       const inserted = await client.query(
-        `INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig, ratchet_pubkey, ratchet_sig)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO users (user_id, identity_pubkey, ratchet_pubkey, ratchet_sig)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (user_id) DO NOTHING`,
-        [
-          body.userID,
-          Buffer.from(identityPublicKey),
-          Buffer.from(exchangePublicKey),
-          Buffer.from(exchangeSignature),
-          ratchetPublicKey === null ? null : Buffer.from(ratchetPublicKey),
-          ratchetSignature === null ? null : Buffer.from(ratchetSignature),
-        ],
+        [body.userID, Buffer.from(identityPublicKey), Buffer.from(ratchetPublicKey), Buffer.from(ratchetSignature)],
       );
       if (inserted.rowCount !== 1) {
         await client.query("ROLLBACK");

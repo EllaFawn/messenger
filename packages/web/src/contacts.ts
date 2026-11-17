@@ -1,5 +1,6 @@
 import * as crypto from "@messager/crypto";
 import { deriveUserId } from "@messager/protocol";
+import { RATCHET_KEY_BYTES } from "@messager/ratchet";
 import type { ApiClient, PublicKeys } from "./api/client.js";
 import type { StoredIdentity } from "./identity.js";
 import { getContact, putContact, putNewContact } from "./storage/contact-store.js";
@@ -17,22 +18,22 @@ export interface Contact {
   /** A label chosen by the user; never sent to the server. */
   name: string;
   identityPublicKey: Uint8Array;
-  /** The pinned key that messages are encrypted to. */
-  exchangePublicKey: Uint8Array;
+  /** The pinned long-term ratchet key that sessions with them are built on. */
+  ratchetPublicKey: Uint8Array;
   /** Unix ms. */
   addedAt: number;
   /**
-   * Set when the server has offered a different exchange key from the pinned
+   * Set when the server has offered a different ratchet key from the pinned
    * one. While this is set, sending to the contact is blocked.
    */
-  changedExchangePublicKey: Uint8Array | null;
+  changedRatchetPublicKey: Uint8Array | null;
 }
 
 function isBytes(value: unknown, length: number): value is Uint8Array {
   return value instanceof Uint8Array && value.length === length;
 }
 
-function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+export function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
   return a.length === b.length && a.every((byte, i) => byte === b[i]);
 }
 
@@ -46,16 +47,16 @@ export function isValidContact(value: unknown): value is Contact {
     typeof v.name === "string" &&
     v.name.length <= MAX_CONTACT_NAME_LENGTH &&
     isBytes(v.identityPublicKey, crypto.IDENTITY_PUBLIC_KEY_BYTES) &&
-    isBytes(v.exchangePublicKey, crypto.EXCHANGE_KEY_BYTES) &&
+    isBytes(v.ratchetPublicKey, RATCHET_KEY_BYTES) &&
     typeof v.addedAt === "number" &&
-    (v.changedExchangePublicKey === null || isBytes(v.changedExchangePublicKey, crypto.EXCHANGE_KEY_BYTES)) &&
+    (v.changedRatchetPublicKey === null || isBytes(v.changedRatchetPublicKey, RATCHET_KEY_BYTES)) &&
     deriveUserId(v.identityPublicKey) === v.userId
   );
 }
 
 /** True if messages may be sent to this contact: no unresolved key change. */
 export function canSendTo(contact: Contact): boolean {
-  return contact.changedExchangePublicKey === null;
+  return contact.changedRatchetPublicKey === null;
 }
 
 export interface AddContactParams {
@@ -89,16 +90,16 @@ export async function addContact(params: AddContactParams): Promise<Contact> {
     userId,
     name,
     identityPublicKey: keys.identityPublicKey,
-    exchangePublicKey: keys.exchangePublicKey,
+    ratchetPublicKey: keys.ratchetPublicKey,
     addedAt: (params.now ?? Date.now)(),
-    changedExchangePublicKey: null,
+    changedRatchetPublicKey: null,
   };
   await putNewContact(params.db, contact);
   return contact;
 }
 
 /**
- * Compares freshly fetched keys with the pinned ones. A different exchange
+ * Compares freshly fetched keys with the pinned ones. A different ratchet
  * key is recorded on the contact, which blocks sending until the user
  * decides; the pinned key itself is never replaced here.
  */
@@ -111,11 +112,11 @@ export async function recordFetchedKeys(db: IDBDatabase, userId: string, fetched
     // getPubkeys already guarantees this; refuse rather than trust the caller.
     throw new Error("Fetched keys do not belong to this contact.");
   }
-  if (sameBytes(fetched.exchangePublicKey, contact.exchangePublicKey)) {
+  if (sameBytes(fetched.ratchetPublicKey, contact.ratchetPublicKey)) {
     // An earlier warning is kept: a server that showed a different key once is not cleared by behaving later.
     return contact;
   }
-  const updated: Contact = { ...contact, changedExchangePublicKey: fetched.exchangePublicKey };
+  const updated: Contact = { ...contact, changedRatchetPublicKey: fetched.ratchetPublicKey };
   await putContact(db, updated);
   return updated;
 }
@@ -136,13 +137,13 @@ export async function acceptChangedKey(db: IDBDatabase, userId: string): Promise
   if (contact === null) {
     throw new Error("No such contact.");
   }
-  if (contact.changedExchangePublicKey === null) {
+  if (contact.changedRatchetPublicKey === null) {
     return contact;
   }
   const updated: Contact = {
     ...contact,
-    exchangePublicKey: contact.changedExchangePublicKey,
-    changedExchangePublicKey: null,
+    ratchetPublicKey: contact.changedRatchetPublicKey,
+    changedRatchetPublicKey: null,
   };
   await putContact(db, updated);
   return updated;
@@ -154,10 +155,10 @@ export async function rejectChangedKey(db: IDBDatabase, userId: string): Promise
   if (contact === null) {
     throw new Error("No such contact.");
   }
-  if (contact.changedExchangePublicKey === null) {
+  if (contact.changedRatchetPublicKey === null) {
     return contact;
   }
-  const updated: Contact = { ...contact, changedExchangePublicKey: null };
+  const updated: Contact = { ...contact, changedRatchetPublicKey: null };
   await putContact(db, updated);
   return updated;
 }

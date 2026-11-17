@@ -193,8 +193,8 @@ describe("removeUser", () => {
       [bob, alice],
     ] as const) {
       await db.pool.query(
-        "INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext) VALUES ($1, $2, $3, $4)",
-        [from.userId, to.userId, Buffer.alloc(24), Buffer.alloc(16)],
+        "INSERT INTO messages (from_user_id, to_user_id, msg_type, ciphertext) VALUES ($1, $2, $3, $4)",
+        [from.userId, to.userId, 1, Buffer.alloc(16)],
       );
     }
 
