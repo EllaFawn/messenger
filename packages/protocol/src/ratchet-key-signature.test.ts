@@ -1,6 +1,5 @@
 import * as crypto from "@messager/crypto";
 import { beforeAll, describe, expect, it } from "vitest";
-import { signExchangeKey, verifyExchangeKey } from "./exchange-key-signature.js";
 import {
   buildOneTimeKeyStatement,
   buildRatchetKeyStatement,
@@ -109,11 +108,16 @@ describe("one-time key signature", () => {
 });
 
 describe("signatures for different purposes cannot be swapped", () => {
-  it("keeps ratchet-key, one-time-key, exchange-key and request signatures apart", () => {
+  it("keeps ratchet-key, one-time-key, retired exchange-key and request signatures apart", () => {
     const identity = crypto.generateIdentityKeyPair();
     const ratchetSig = signRatchetKey(key(1), identity.privateKey);
     const oneTimeSig = signOneTimeKey(key(1), key(1), identity.privateKey);
-    const exchangeSig = signExchangeKey(key(1), identity.privateKey);
+    // The statement the retired static exchange key was signed with (M1).
+    const oldPrefix = crypto.utf8Encode("messager/v1/exchange-key\n");
+    const oldStatement = new Uint8Array(oldPrefix.length + 32);
+    oldStatement.set(oldPrefix, 0);
+    oldStatement.set(key(1), oldPrefix.length);
+    const exchangeSig = crypto.sign(identity.privateKey, oldStatement);
     const requestSig = signRequest(
       { method: "POST", path: "/keys/one-time", rawBody: key(1), timestamp: 1, nonce: "n" },
       identity.privateKey,
@@ -124,6 +128,5 @@ describe("signatures for different purposes cannot be swapped", () => {
     expect(verifyRatchetKey(key(1), requestSig, identity.publicKey)).toBe(false);
     expect(verifyOneTimeKey(key(1), key(1), ratchetSig, identity.publicKey)).toBe(false);
     expect(verifyOneTimeKey(key(1), key(1), exchangeSig, identity.publicKey)).toBe(false);
-    expect(verifyExchangeKey(key(1), ratchetSig, identity.publicKey)).toBe(false);
   });
 });

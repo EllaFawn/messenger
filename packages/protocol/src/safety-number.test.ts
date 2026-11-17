@@ -9,17 +9,17 @@ beforeAll(async () => {
 function randomKeys(): SafetyNumberKeys {
   return {
     identityPublicKey: crypto.generateIdentityKeyPair().publicKey,
-    exchangePublicKey: crypto.generateExchangeKeyPair().publicKey,
+    ratchetPublicKey: crypto.randomBytes(32),
   };
 }
 
 const FIXED_A: SafetyNumberKeys = {
   identityPublicKey: new Uint8Array(32).fill(1),
-  exchangePublicKey: new Uint8Array(32).fill(2),
+  ratchetPublicKey: new Uint8Array(32).fill(2),
 };
 const FIXED_B: SafetyNumberKeys = {
   identityPublicKey: new Uint8Array(32).fill(3),
-  exchangePublicKey: new Uint8Array(32).fill(4),
+  ratchetPublicKey: new Uint8Array(32).fill(4),
 };
 
 describe("safety number", () => {
@@ -35,18 +35,18 @@ describe("safety number", () => {
 
   it("matches fixed values", () => {
     // Pinned: changing the derivation would make every pair's number change.
-    expect(keyFingerprint(FIXED_A)).toBe("101497340341902156561904816833");
-    expect(keyFingerprint(FIXED_B)).toBe("511224359483142768556075042734");
-    expect(computeSafetyNumber(FIXED_A, FIXED_B)).toBe("10149 73403 41902 15656 19048 16833 51122 43594 83142 76855 60750 42734");
+    expect(keyFingerprint(FIXED_A)).toBe("454602193328691609857958431761");
+    expect(keyFingerprint(FIXED_B)).toBe("877537721943452803081335283211");
+    expect(computeSafetyNumber(FIXED_A, FIXED_B)).toBe("45460 21933 28691 60985 79584 31761 87753 77219 43452 80308 13352 83211");
   });
 
-  it("changes when either user's exchange key is swapped", () => {
+  it("changes when either user's ratchet key is swapped", () => {
     const a = randomKeys();
     const b = randomKeys();
     const original = computeSafetyNumber(a, b);
-    const swapped = crypto.generateExchangeKeyPair().publicKey;
-    expect(computeSafetyNumber(a, { ...b, exchangePublicKey: swapped })).not.toBe(original);
-    expect(computeSafetyNumber({ ...a, exchangePublicKey: swapped }, b)).not.toBe(original);
+    const swapped = crypto.randomBytes(32);
+    expect(computeSafetyNumber(a, { ...b, ratchetPublicKey: swapped })).not.toBe(original);
+    expect(computeSafetyNumber({ ...a, ratchetPublicKey: swapped }, b)).not.toBe(original);
   });
 
   it("changes when either user's identity key is swapped", () => {
@@ -60,7 +60,7 @@ describe("safety number", () => {
 
   it("does not treat the two keys as interchangeable", () => {
     const keys = randomKeys();
-    const flipped = { identityPublicKey: keys.exchangePublicKey, exchangePublicKey: keys.identityPublicKey };
+    const flipped = { identityPublicKey: keys.ratchetPublicKey, ratchetPublicKey: keys.identityPublicKey };
     expect(keyFingerprint(flipped)).not.toBe(keyFingerprint(keys));
   });
 
@@ -75,14 +75,14 @@ describe("safety number", () => {
   it("keeps leading zeros in a group", () => {
     // Across 200 keys some groups are certain to start with 0; every one must still be 30 digits.
     for (let i = 0; i < 200; i++) {
-      const fingerprint = keyFingerprint({ ...FIXED_A, exchangePublicKey: new Uint8Array(32).fill(i) });
+      const fingerprint = keyFingerprint({ ...FIXED_A, ratchetPublicKey: new Uint8Array(32).fill(i) });
       expect(fingerprint).toHaveLength(30);
       expect(fingerprint).toMatch(/^\d{30}$/);
     }
   });
 
   it("refuses keys of the wrong length", () => {
-    expect(() => keyFingerprint({ ...FIXED_A, exchangePublicKey: new Uint8Array(31) })).toThrow();
+    expect(() => keyFingerprint({ ...FIXED_A, ratchetPublicKey: new Uint8Array(31) })).toThrow();
     expect(() => computeSafetyNumber(FIXED_A, { ...FIXED_B, identityPublicKey: new Uint8Array(33) })).toThrow();
   });
 });

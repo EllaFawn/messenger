@@ -87,39 +87,55 @@ describe("buildCanonicalString (golden)", () => {
 });
 
 describe("envelope encode/decode", () => {
-  it("round-trips to/nonce/ciphertext", () => {
+  it("round-trips to/type/ciphertext", () => {
     const to = "some-user-id";
-    const nonce = crypto.randomBytes(24);
-    const ciphertext = crypto.utf8Encode("opaque-ciphertext-bytes");
+    const body = crypto.utf8Encode("opaque-ratchet-message");
 
-    const envelope = encodeEnvelope(to, nonce, ciphertext);
-    expect(envelope.v).toBe(1);
-    expect(typeof envelope.nonce).toBe("string");
-    expect(typeof envelope.ciphertext).toBe("string");
+    for (const type of [0, 1] as const) {
+      const envelope = encodeEnvelope(to, { type, body });
+      expect(envelope).toEqual({ v: 2, to, type, ciphertext: crypto.toBase64(body) });
 
-    const decoded = decodeEnvelope(envelope);
-    expect(decoded.to).toBe(to);
-    expect(crypto.toHex(decoded.nonce)).toBe(crypto.toHex(nonce));
-    expect(crypto.toHex(decoded.ciphertext)).toBe(crypto.toHex(ciphertext));
+      const decoded = decodeEnvelope(envelope);
+      expect(decoded.to).toBe(to);
+      expect(decoded.type).toBe(type);
+      expect(crypto.toHex(decoded.body)).toBe(crypto.toHex(body));
+    }
   });
 
   it("rejects an unsupported version", () => {
-    const envelope = encodeEnvelope("u", crypto.randomBytes(24), crypto.utf8Encode("x"));
+    const envelope = encodeEnvelope("u", { type: 1, body: crypto.utf8Encode("x") });
     // @ts-expect-error deliberately corrupting the version for the test
-    envelope.v = 2;
+    envelope.v = 1;
     expect(() => decodeEnvelope(envelope)).toThrow();
+  });
+
+  it("rejects an unknown message type", () => {
+    const envelope = encodeEnvelope("u", { type: 1, body: crypto.utf8Encode("x") });
+    // @ts-expect-error deliberately corrupting the type for the test
+    envelope.type = 2;
+    expect(() => decodeEnvelope(envelope)).toThrow();
+    // @ts-expect-error
+    expect(() => encodeEnvelope("u", { type: 7, body: crypto.utf8Encode("x") })).toThrow();
   });
 });
 
 describe("message plaintext encode/decode", () => {
-  it("round-trips counter/text/sentAt", () => {
-    const message = { counter: 42, text: "hello", sentAt: 1754400000000 };
+  it("round-trips text/sentAt", () => {
+    const message = { text: "hello", sentAt: 1754400000000 };
     const bytes = encodeMessagePlaintext(message);
     expect(decodeMessagePlaintext(bytes)).toEqual(message);
   });
 
+  it("keeps only the known fields", () => {
+    const bytes = crypto.utf8Encode('{"text":"hi","sentAt":5,"counter":9,"extra":true}');
+    expect(decodeMessagePlaintext(bytes)).toEqual({ text: "hi", sentAt: 5 });
+  });
+
   it("rejects malformed plaintext", () => {
-    expect(() => decodeMessagePlaintext(crypto.utf8Encode('{"counter":1}'))).toThrow();
+    expect(() => decodeMessagePlaintext(crypto.utf8Encode('{"text":"x"}'))).toThrow();
+    expect(() => decodeMessagePlaintext(crypto.utf8Encode('{"text":1,"sentAt":1}'))).toThrow();
+    expect(() => decodeMessagePlaintext(crypto.utf8Encode('{"text":"x","sentAt":null}'))).toThrow();
+    expect(() => decodeMessagePlaintext(crypto.utf8Encode("[]"))).toThrow();
     expect(() => decodeMessagePlaintext(crypto.utf8Encode("not json"))).toThrow();
   });
 });
