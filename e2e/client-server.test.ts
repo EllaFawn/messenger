@@ -54,7 +54,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE one_time_keys, invites, messages, auth_nonces, users");
   server = await startServer({ pool: db.pool, host: "127.0.0.1", port: 0 });
   // Through the /api prefix, exactly as the page reaches the server.
   client = createApiClient({ baseUrl: `${server.url}/api` });
@@ -304,7 +304,7 @@ describe("signing up", () => {
     const alice = await newBrowser();
     const bob = await newBrowser();
     await befriend(alice, bob);
-    await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
+    await db.pool.query("TRUNCATE one_time_keys, invites, messages, auth_nonces, users");
 
     const refused = await check(alice).catch((e: unknown) => e);
     expect(isRejectedByServer(refused)).toBe(true);

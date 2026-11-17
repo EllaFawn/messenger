@@ -18,6 +18,11 @@ export interface RateLimits {
   keyLookup: RateRule;
   /** Every other signed request, per caller. */
   signed: RateRule;
+  /**
+   * One-time keys claimed, per caller and target together. Each claim uses
+   * up one of the target's keys, so this stops one user draining another's supply.
+   */
+  keyClaim: RateRule;
 }
 
 export const DEFAULT_RATE_LIMITS: RateLimits = {
@@ -27,6 +32,7 @@ export const DEFAULT_RATE_LIMITS: RateLimits = {
   sendMessage: { limit: 60, windowMs: MINUTE },
   keyLookup: { limit: 30, windowMs: MINUTE },
   signed: { limit: 300, windowMs: MINUTE },
+  keyClaim: { limit: 10, windowMs: HOUR },
 };
 
 export type Limiters = { [K in keyof RateLimits]: RateLimiter };
@@ -39,6 +45,7 @@ export function createLimiters(limits: RateLimits = DEFAULT_RATE_LIMITS, now?: (
     sendMessage: new RateLimiter(limits.sendMessage, now),
     keyLookup: new RateLimiter(limits.keyLookup, now),
     signed: new RateLimiter(limits.signed, now),
+    keyClaim: new RateLimiter(limits.keyClaim, now),
   };
 }
 

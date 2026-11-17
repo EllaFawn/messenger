@@ -3,6 +3,7 @@ import express, { type ErrorRequestHandler, type Express } from "express";
 import type { Pool } from "./db/pool.js";
 import { guardFailedAuth, type LimitDeps } from "./limits.js";
 import { getRawBody, rememberRawBody } from "./raw-body.js";
+import { keysRouter } from "./routes/keys.js";
 import { messagesRouter, type QueueLimits } from "./routes/messages.js";
 import { registerRouter } from "./routes/register.js";
 import { usersRouter } from "./routes/users.js";
@@ -127,6 +128,7 @@ export function createApp(deps: AppDeps): Express {
   app.use(registerRouter(deps));
   app.use(usersRouter(deps));
   app.use(messagesRouter(deps));
+  app.use(keysRouter(deps));
   if (deps.webDir !== undefined) {
     const serveWeb = express.static(deps.webDir, {
       dotfiles: "ignore",

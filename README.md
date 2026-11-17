@@ -95,10 +95,13 @@ Routes so far:
 |---|---|---|
 | `GET /health` | none | Liveness check |
 | `POST /register` | signed by the key being registered + a single-use invite | Create an account |
-| `GET /users/:userID/pubkeys` | signed | Fetch a user's public keys |
-| `POST /messages` | signed | Send an encrypted message; the sender is taken from the signature |
+| `GET /users/:userID/pubkeys` | signed | Fetch a user's public keys, including the long-term ratchet key if set |
+| `POST /messages` | signed | Send an encrypted message (static-key v1 or ratchet v2); the sender is taken from the signature |
 | `GET /messages/inbox` | signed | The caller's unacknowledged messages, oldest first, 100 per page (`?after=<cursor>` for the next) |
 | `POST /messages/:id/ack` | signed, recipient only | Confirm receipt; the server deletes the message |
+| `POST /keys/one-time` | signed | Upload signed one-time keys (up to 50 per request, 100 held) and optionally a fallback key |
+| `GET /keys/count` | signed | How many of the caller's one-time keys are left |
+| `POST /users/:userID/keys/claim` | signed | Take one of a user's one-time keys to start a forward-secret conversation |
 | `GET /ws` (WebSocket) | signed, via query parameters | Tells you at once when a message arrives; carries no content |
 
 Signed requests carry `X-User-ID`, `X-Timestamp`, `X-Nonce` and
@@ -123,6 +126,7 @@ A running server always applies these. Refusals are `429` with a
 | Messages sent | sender | 60 per minute |
 | Public-key lookups | caller | 30 per minute |
 | Other signed requests | caller | 300 per minute |
+| One-time key claims | caller and target together | 10 per hour |
 
 - A recipient holds at most 500 undelivered messages from one sender and
   5,000 in total; undelivered messages are deleted after 30 days.

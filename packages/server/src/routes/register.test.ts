@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { signExchangeKey } from "@messager/protocol";
+import { signExchangeKey, signRatchetKey } from "@messager/protocol";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createApp } from "../app.js";
 import { TIMESTAMP_WINDOW_MS } from "../auth/signed-request.js";
@@ -29,7 +29,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE one_time_keys, invites, messages, auth_nonces, users");
   alice = makeIdentity();
   invite = await issueInvite(db.pool);
 });
@@ -76,6 +76,67 @@ describe("POST /register", () => {
     expect(new Uint8Array(stored.rows[0].identity_pubkey)).toEqual(alice.identity.publicKey);
     expect(new Uint8Array(stored.rows[0].exchange_pubkey)).toEqual(alice.exchange.publicKey);
     expect(new Uint8Array(stored.rows[0].exchange_sig)).toEqual(alice.exchangeSig);
+  });
+
+  describe("ratchet key", () => {
+    const withRatchet = (who: TestIdentity, overrides: Record<string, unknown> = {}) =>
+      registrationBody(who, {
+        ratchet_pubkey: crypto.toBase64(who.ratchetKey),
+        ratchet_sig: crypto.toBase64(who.ratchetSig),
+        ...overrides,
+      });
+
+    it("stores a signed ratchet key given at registration", async () => {
+      expect((await register(alice, withRatchet(alice))).status).toBe(201);
+      const row = (await db.pool.query("SELECT ratchet_pubkey, ratchet_sig, key_epoch FROM users")).rows[0];
+      expect(new Uint8Array(row.ratchet_pubkey)).toEqual(alice.ratchetKey);
+      expect(new Uint8Array(row.ratchet_sig)).toEqual(alice.ratchetSig);
+      expect(row.key_epoch).toBe(1);
+    });
+
+    it("still registers an account without one, for now", async () => {
+      expect((await register(alice, registrationBody(alice))).status).toBe(201);
+      const row = (await db.pool.query("SELECT ratchet_pubkey, ratchet_sig FROM users")).rows[0];
+      expect(row.ratchet_pubkey).toBeNull();
+      expect(row.ratchet_sig).toBeNull();
+    });
+
+    it("rejects a ratchet key the identity key did not sign", async () => {
+      const mallory = makeIdentity();
+      const res = await register(alice, withRatchet(alice, { ratchet_pubkey: crypto.toBase64(mallory.ratchetKey) }));
+      await expectRejected(res, 400, "invalid_request");
+    });
+
+    it("rejects a signature made by someone else", async () => {
+      const mallory = makeIdentity();
+      const forged = signRatchetKey(alice.ratchetKey, mallory.identity.privateKey);
+      const res = await register(alice, withRatchet(alice, { ratchet_sig: crypto.toBase64(forged) }));
+      await expectRejected(res, 400, "invalid_request");
+    });
+
+    it("does not accept an exchange-key signature in its place", async () => {
+      // Same key bytes, signed for the other purpose.
+      const wrongPurpose = signExchangeKey(alice.ratchetKey, alice.identity.privateKey);
+      const res = await register(alice, withRatchet(alice, { ratchet_sig: crypto.toBase64(wrongPurpose) }));
+      await expectRejected(res, 400, "invalid_request");
+    });
+
+    it.each([
+      ["the key without the signature", { ratchet_sig: undefined }],
+      ["the signature without the key", { ratchet_pubkey: undefined }],
+      ["a key of the wrong length", { ratchet_pubkey: "AAAA" }],
+      ["a signature of the wrong length", { ratchet_sig: "AAAA" }],
+      ["a key that is not text", { ratchet_pubkey: 7 }],
+      ["a null key", { ratchet_pubkey: null }],
+    ])("rejects %s", async (_label, overrides) => {
+      const res = await register(alice, withRatchet(alice, overrides));
+      await expectRejected(res, 400, "invalid_request");
+    });
+
+    it("does not use up the invite when the ratchet key is refused", async () => {
+      await register(alice, withRatchet(alice, { ratchet_sig: "AAAA" }));
+      expect((await inviteState()).used_at).toBeNull();
+    });
   });
 
   describe("exchange-key signature", () => {

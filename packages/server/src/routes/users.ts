@@ -21,8 +21,12 @@ export function usersRouter(deps: AuthDeps): Router {
       identity_pubkey: Buffer;
       exchange_pubkey: Buffer;
       exchange_sig: Buffer;
+      ratchet_pubkey: Buffer | null;
+      ratchet_sig: Buffer | null;
+      key_epoch: number;
     }>(
-      "SELECT identity_pubkey, exchange_pubkey, exchange_sig FROM users WHERE user_id = $1",
+      `SELECT identity_pubkey, exchange_pubkey, exchange_sig, ratchet_pubkey, ratchet_sig, key_epoch
+       FROM users WHERE user_id = $1`,
       [userId],
     );
     const row = result.rows[0];
@@ -37,6 +41,11 @@ export function usersRouter(deps: AuthDeps): Router {
       exchange_pubkey: row.exchange_pubkey.toString("base64"),
       // The identity key's signature over the exchange key; callers verify it.
       exchange_sig: row.exchange_sig.toString("base64"),
+      // The long-term ratchet key and the identity key's signature over it, or
+      // null for an account that has not set one. Reading these spends no one-time key.
+      ratchet_pubkey: row.ratchet_pubkey?.toString("base64") ?? null,
+      ratchet_sig: row.ratchet_sig?.toString("base64") ?? null,
+      key_epoch: row.key_epoch,
     });
     },
   );
