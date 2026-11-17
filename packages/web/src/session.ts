@@ -1,6 +1,7 @@
 import { ApiError, type ApiClient } from "./api/client.js";
 import { createIdentity, type StoredIdentity } from "./identity.js";
-import { loadIdentity, markRegistered, saveNewIdentity } from "./storage/identity-store.js";
+import { topUpOneTimeKeys } from "./one-time-keys.js";
+import { ensureRatchetAccount, loadIdentity, markRegistered, saveNewIdentity } from "./storage/identity-store.js";
 
 /** Where this browser is in the sign-up process. */
 export type Session =
@@ -9,7 +10,9 @@ export type Session =
   | { status: "unregistered"; identity: StoredIdentity }
   | { status: "registered"; identity: StoredIdentity };
 
+/** Requires the ratchet module to be loaded: an identity from before forward secrecy is given an account here. */
 export async function loadSession(db: IDBDatabase): Promise<Session> {
+  await ensureRatchetAccount(db);
   const identity = await loadIdentity(db);
   if (identity === null) {
     return { status: "none" };
@@ -37,10 +40,12 @@ export async function signUp(params: SignUpParams): Promise<Session> {
     throw new Error("Enter the invite code.");
   }
 
+  await ensureRatchetAccount(params.db);
   let identity = await loadIdentity(params.db);
   if (identity === null) {
-    identity = createIdentity(now());
-    await saveNewIdentity(params.db, identity);
+    const created = createIdentity(now());
+    await saveNewIdentity(params.db, created.identity, created.accountPickle);
+    identity = created.identity;
   }
   if (identity.registeredAt !== null) {
     return { status: "registered", identity };
@@ -59,6 +64,7 @@ export async function signUp(params: SignUpParams): Promise<Session> {
 
   const registeredAt = now();
   await markRegistered(params.db, registeredAt);
+  await publishKeysQuietly(params.db, params.client, identity);
   return { status: "registered", identity: { ...identity, registeredAt } };
 }
 
@@ -89,18 +95,33 @@ export async function registerAgain(params: {
   if (inviteCode === "") {
     throw new Error("Enter the invite code.");
   }
+  await ensureRatchetAccount(params.db);
   const identity = await loadIdentity(params.db);
   if (identity === null) {
     throw new Error("There is no identity in this browser to register.");
   }
   try {
     await params.client.register(identity, inviteCode);
+    // The server's copies of the one-time keys went with the old account.
+    await publishKeysQuietly(params.db, params.client, identity);
     return "registered";
   } catch (error) {
     if (error instanceof ApiError && error.code === "already_registered") {
       return "already_registered";
     }
     throw error;
+  }
+}
+
+/**
+ * Uploads one-time keys so others can start conversations. Not fatal if it
+ * fails: the app tries again every time it starts.
+ */
+async function publishKeysQuietly(db: IDBDatabase, client: ApiClient, me: StoredIdentity): Promise<void> {
+  try {
+    await topUpOneTimeKeys({ db, client, me });
+  } catch {
+    // Retried later.
   }
 }
 
@@ -120,6 +141,8 @@ export function describeError(error: unknown): string {
         return "This contact has too many unread messages waiting. Try again once they have been online.";
       case "not_found":
         return "The server has no user with that ID.";
+      case "no_one_time_keys":
+        return "This contact cannot be reached yet: they need to open the app once so it can publish their keys.";
       default:
         return `The server reported a problem (${error.code}).`;
     }

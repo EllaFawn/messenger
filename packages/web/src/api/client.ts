@@ -1,11 +1,15 @@
 import * as crypto from "@messager/crypto";
 import {
   deriveUserId,
-  signExchangeKey,
+  signOneTimeKey,
+  signRatchetKey,
   signRequest,
-  verifyExchangeKey,
+  verifyOneTimeKey,
+  verifyRatchetKey,
   type Envelope,
+  type RatchetMessageType,
 } from "@messager/protocol";
+import type { OneTimeKey } from "@messager/ratchet";
 import type { StoredIdentity } from "../identity.js";
 
 /** The browser reaches the server through this same-origin prefix; see vite.config.ts. */
@@ -37,15 +41,32 @@ export interface ApiClientOptions {
 export interface PublicKeys {
   userId: string;
   identityPublicKey: Uint8Array;
-  exchangePublicKey: Uint8Array;
+  /** Their long-term ratchet key, signed by the identity key. */
+  ratchetPublicKey: Uint8Array;
+  /** Raised each time the user replaces their ratchet key. */
+  keyEpoch: number;
+}
+
+/** A user's keys plus one of their one-time keys, for starting a session. All checked against the userID. */
+export interface ClaimedKeys extends PublicKeys {
+  oneTimeKey: Uint8Array;
+  /** True if the server was out of one-time keys and gave the reusable fallback key. */
+  fallback: boolean;
+}
+
+/** How many of this user's one-time keys the server still holds. */
+export interface KeyCount {
+  count: number;
+  hasFallback: boolean;
 }
 
 /** A message waiting on the server. Still encrypted; `from` is the server's claim until decryption proves it. */
 export interface InboxItem {
   messageId: string;
   from: string;
+  /** 0: a pre-key message, which can start a session. 1: a normal message. */
+  type: RatchetMessageType;
   /** Standard base64, as in the wire envelope. */
-  nonce: string;
   ciphertext: string;
   /** ISO time the server stored it. */
   createdAt: string;
@@ -55,8 +76,6 @@ export interface InboxItem {
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const USER_ID_PATTERN = /^[A-Za-z0-9_-]{43}$/;
-/** Standard base64 of exactly 24 bytes. */
-const MESSAGE_NONCE_PATTERN = /^[A-Za-z0-9+/]{32}$/;
 const BASE64_PATTERN = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 /** Guards against a server sending an absurdly large inbox entry. */
 const MAX_CIPHERTEXT_CHARS = 64 * 1024;
@@ -67,19 +86,18 @@ function parseInboxItem(value: unknown): InboxItem | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
-  const { message_id, from, v, nonce, ciphertext, created_at, cursor } = value as Record<string, unknown>;
+  const { message_id, from, v, type, ciphertext, created_at, cursor } = value as Record<string, unknown>;
   if (
-    v !== 1 ||
+    v !== 2 ||
+    (type !== 0 && type !== 1) ||
     typeof message_id !== "string" ||
     typeof from !== "string" ||
-    typeof nonce !== "string" ||
     typeof ciphertext !== "string" ||
     typeof created_at !== "string" ||
     typeof cursor !== "string" ||
     !CURSOR_PATTERN.test(cursor) ||
     !UUID_PATTERN.test(message_id) ||
     !USER_ID_PATTERN.test(from) ||
-    !MESSAGE_NONCE_PATTERN.test(nonce) ||
     ciphertext.length === 0 ||
     ciphertext.length > MAX_CIPHERTEXT_CHARS ||
     !BASE64_PATTERN.test(ciphertext) ||
@@ -87,8 +105,11 @@ function parseInboxItem(value: unknown): InboxItem | null {
   ) {
     return null;
   }
-  return { messageId: message_id, from, nonce, ciphertext, createdAt: created_at, cursor };
+  return { messageId: message_id, from, type, ciphertext, createdAt: created_at, cursor };
 }
+
+/** Put in front of a fallback key's id when uploading it; see uploadOneTimeKeys. */
+export const FALLBACK_ID_PREFIX = "fallback-";
 
 /** Standard base64 of exactly 32 bytes. */
 const KEY_PATTERN = /^[A-Za-z0-9+/]{43}=$/;
@@ -102,15 +123,26 @@ export interface ApiClient {
    * path, e.g. "/messages/inbox". Throws ApiError on any failure.
    */
   request(identity: StoredIdentity, method: string, path: string, body?: unknown): Promise<unknown>;
-  /** Registers the identity's public keys with the server. */
+  /** Registers the identity key and the signed ratchet key with the server. */
   register(identity: StoredIdentity, inviteCode: string): Promise<void>;
   /**
    * Fetches a user's public keys. Rejects the reply unless the identity key
-   * hashes to the userID that was asked for and has signed the exchange key,
+   * hashes to the userID that was asked for and has signed the ratchet key,
    * so the server cannot substitute either key. Throws ApiError "not_found"
    * if no such user.
    */
   getPubkeys(identity: StoredIdentity, userId: string): Promise<PublicKeys>;
+  /**
+   * Takes one of a user's one-time keys, to start a session with them. The
+   * server hands each out once. Checked like getPubkeys, and the one-time
+   * key must be signed together with that ratchet key. Throws ApiError
+   * "no_one_time_keys" if they have none left at all.
+   */
+  claimOneTimeKey(identity: StoredIdentity, userId: string): Promise<ClaimedKeys>;
+  /** How many of my one-time keys the server still holds. */
+  countOneTimeKeys(identity: StoredIdentity): Promise<KeyCount>;
+  /** Signs and uploads one-time keys, and optionally a new fallback key. */
+  uploadOneTimeKeys(identity: StoredIdentity, keys: OneTimeKey[], fallback?: OneTimeKey): Promise<KeyCount>;
   /** Hands an already-encrypted envelope to the server for delivery. */
   sendMessage(identity: StoredIdentity, envelope: Envelope): Promise<{ messageId: string }>;
   /**
@@ -205,9 +237,9 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     const result = await request(identity, "POST", "/register", {
       userID: identity.userId,
       identity_pubkey: crypto.toBase64(identity.identityPublicKey),
-      exchange_pubkey: crypto.toBase64(identity.exchangePublicKey),
-      // The identity key vouches for the exchange key, so contacts can verify it from the userID alone.
-      exchange_sig: crypto.toBase64(signExchangeKey(identity.exchangePublicKey, identity.identityPrivateKey)),
+      ratchet_pubkey: crypto.toBase64(identity.ratchetPublicKey),
+      // The identity key vouches for the ratchet key, so contacts can verify it from the userID alone.
+      ratchet_sig: crypto.toBase64(signRatchetKey(identity.ratchetPublicKey, identity.identityPrivateKey)),
       inviteCode,
     });
     const confirmed =
@@ -217,30 +249,93 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     }
   }
 
-  async function getPubkeys(identity: StoredIdentity, userId: string): Promise<PublicKeys> {
-    const result = await request(identity, "GET", `/users/${encodeURIComponent(userId)}/pubkeys`);
+  /** Checks the keys part of a pubkeys or claim reply against the userID that was asked for. */
+  function parseUserKeys(result: unknown, userId: string): PublicKeys {
     const reply = typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
-    const { userID, identity_pubkey, exchange_pubkey, exchange_sig } = reply;
+    const { userID, identity_pubkey, ratchet_pubkey, ratchet_sig, key_epoch } = reply;
     if (
       userID !== userId ||
       typeof identity_pubkey !== "string" ||
-      typeof exchange_pubkey !== "string" ||
-      typeof exchange_sig !== "string" ||
+      typeof ratchet_pubkey !== "string" ||
+      typeof ratchet_sig !== "string" ||
       !KEY_PATTERN.test(identity_pubkey) ||
-      !KEY_PATTERN.test(exchange_pubkey) ||
-      !SIGNATURE_PATTERN.test(exchange_sig)
+      !KEY_PATTERN.test(ratchet_pubkey) ||
+      !SIGNATURE_PATTERN.test(ratchet_sig) ||
+      !Number.isSafeInteger(key_epoch) ||
+      (key_epoch as number) < 1
     ) {
       throw new ApiError(200, "invalid_response");
     }
     const identityPublicKey = crypto.fromBase64(identity_pubkey);
-    const exchangePublicKey = crypto.fromBase64(exchange_pubkey);
+    const ratchetPublicKey = crypto.fromBase64(ratchet_pubkey);
     if (
       deriveUserId(identityPublicKey) !== userId ||
-      !verifyExchangeKey(exchangePublicKey, crypto.fromBase64(exchange_sig), identityPublicKey)
+      !verifyRatchetKey(ratchetPublicKey, crypto.fromBase64(ratchet_sig), identityPublicKey)
     ) {
       throw new ApiError(200, "invalid_response");
     }
-    return { userId, identityPublicKey, exchangePublicKey };
+    return { userId, identityPublicKey, ratchetPublicKey, keyEpoch: key_epoch as number };
+  }
+
+  async function getPubkeys(identity: StoredIdentity, userId: string): Promise<PublicKeys> {
+    return parseUserKeys(await request(identity, "GET", `/users/${encodeURIComponent(userId)}/pubkeys`), userId);
+  }
+
+  async function claimOneTimeKey(identity: StoredIdentity, userId: string): Promise<ClaimedKeys> {
+    const result = await request(identity, "POST", `/users/${encodeURIComponent(userId)}/keys/claim`);
+    const keys = parseUserKeys(result, userId);
+    const claimed = (result as Record<string, unknown>).one_time_key;
+    const entry = typeof claimed === "object" && claimed !== null ? (claimed as Record<string, unknown>) : {};
+    const { key, sig, fallback } = entry;
+    if (
+      typeof key !== "string" ||
+      typeof sig !== "string" ||
+      typeof fallback !== "boolean" ||
+      !KEY_PATTERN.test(key) ||
+      !SIGNATURE_PATTERN.test(sig)
+    ) {
+      throw new ApiError(200, "invalid_response");
+    }
+    const oneTimeKey = crypto.fromBase64(key);
+    // Signed together with the ratchet key: the server cannot pair it with another account's key.
+    if (!verifyOneTimeKey(keys.ratchetPublicKey, oneTimeKey, crypto.fromBase64(sig), keys.identityPublicKey)) {
+      throw new ApiError(200, "invalid_response");
+    }
+    return { ...keys, oneTimeKey, fallback };
+  }
+
+  function parseKeyCount(result: unknown): KeyCount {
+    const reply = typeof result === "object" && result !== null ? (result as Record<string, unknown>) : {};
+    const { count, has_fallback } = reply;
+    if (!Number.isSafeInteger(count) || (count as number) < 0 || typeof has_fallback !== "boolean") {
+      throw new ApiError(200, "invalid_response");
+    }
+    return { count: count as number, hasFallback: has_fallback };
+  }
+
+  async function countOneTimeKeys(identity: StoredIdentity): Promise<KeyCount> {
+    return parseKeyCount(await request(identity, "GET", "/keys/count"));
+  }
+
+  async function uploadOneTimeKeys(
+    identity: StoredIdentity,
+    keys: OneTimeKey[],
+    fallback?: OneTimeKey,
+  ): Promise<KeyCount> {
+    const signed = (k: OneTimeKey) => ({
+      id: k.id,
+      key: crypto.toBase64(k.key),
+      sig: crypto.toBase64(signOneTimeKey(identity.ratchetPublicKey, k.key, identity.identityPrivateKey)),
+    });
+    const body: Record<string, unknown> = { keys: keys.map(signed) };
+    if (fallback !== undefined) {
+      // The ratchet library numbers fallback keys separately from one-time
+      // keys, so the same id can name one of each. The server keeps all of a
+      // user's keys under one set of ids; the prefix keeps them apart. Ids
+      // are only labels: a session is started from the key itself.
+      body.fallback = { ...signed(fallback), id: `${FALLBACK_ID_PREFIX}${fallback.id}` };
+    }
+    return parseKeyCount(await request(identity, "POST", "/keys/one-time", body));
   }
 
   async function sendMessage(identity: StoredIdentity, envelope: Envelope): Promise<{ messageId: string }> {
@@ -282,5 +377,15 @@ export function createApiClient(options: ApiClientOptions = {}): ApiClient {
     await request(identity, "POST", `/messages/${messageId}/ack`);
   }
 
-  return { request, register, getPubkeys, sendMessage, fetchInbox, ackMessage };
+  return {
+    request,
+    register,
+    getPubkeys,
+    claimOneTimeKey,
+    countOneTimeKeys,
+    uploadOneTimeKeys,
+    sendMessage,
+    fetchInbox,
+    ackMessage,
+  };
 }

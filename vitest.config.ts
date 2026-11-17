@@ -13,10 +13,13 @@ const alias = {
   "@messager/ratchet": fileURLToPath(new URL("./packages/ratchet/src/index.ts", import.meta.url)),
 };
 
-function project(name: string) {
+/** Loads the ratchet's WebAssembly before tests that use it, as the page does at start-up. */
+const ratchetSetup = fileURLToPath(new URL("./vitest.ratchet-setup.ts", import.meta.url));
+
+function project(name: string, setupFiles: string[] = []) {
   return {
     resolve: { alias },
-    test: { name, root: `./packages/${name}`, passWithNoTests: true, exclude },
+    test: { name, root: `./packages/${name}`, passWithNoTests: true, exclude, setupFiles },
   };
 }
 
@@ -27,9 +30,9 @@ export default defineConfig({
       project("protocol"),
       project("ratchet"),
       project("server"),
-      project("web"),
+      project("web", [ratchetSetup]),
       // Real web-client code against the real server; see e2e/client-server.test.ts.
-      { resolve: { alias }, test: { name: "e2e", root: "./e2e", exclude } },
+      { resolve: { alias }, test: { name: "e2e", root: "./e2e", exclude, setupFiles: [ratchetSetup] } },
     ],
   },
 });
