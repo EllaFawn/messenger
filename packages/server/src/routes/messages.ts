@@ -18,11 +18,10 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
 /** Most messages returned by one inbox fetch. Acknowledging them brings the next ones into view. */
 export const INBOX_PAGE_SIZE = 100;
 
-interface IncomingEnvelope {
-  to: string;
-  nonce: Buffer;
-  ciphertext: Buffer;
-}
+/** v1: static-key message with its own nonce. v2: ratchet message, typed pre-key (0) or normal (1). */
+type IncomingEnvelope =
+  | { v: 1; to: string; nonce: Buffer; ciphertext: Buffer }
+  | { v: 2; to: string; type: 0 | 1; ciphertext: Buffer };
 
 /** Decodes standard base64, accepting only the one canonical spelling of the bytes. */
 function decodeStrictBase64(text: string): Buffer | null {
@@ -38,23 +37,31 @@ function parseEnvelope(body: unknown): IncomingEnvelope | null {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return null;
   }
-  const { v, to, nonce, ciphertext } = body as Record<string, unknown>;
-  if (
-    v !== 1 ||
-    typeof to !== "string" ||
-    typeof nonce !== "string" ||
-    typeof ciphertext !== "string" ||
-    !USER_ID_PATTERN.test(to) ||
-    !MESSAGE_NONCE_PATTERN.test(nonce)
-  ) {
+  const { v, to, nonce, type, ciphertext } = body as Record<string, unknown>;
+  if (typeof to !== "string" || typeof ciphertext !== "string" || !USER_ID_PATTERN.test(to)) {
+    return null;
+  }
+  const ciphertextBytes = decodeStrictBase64(ciphertext);
+  if (ciphertextBytes === null || ciphertextBytes.length < MIN_CIPHERTEXT_BYTES) {
+    return null;
+  }
+
+  if (v === 2) {
+    // A ratchet message has no separate nonce; sending one means the client is confused.
+    if ((type !== 0 && type !== 1) || nonce !== undefined) {
+      return null;
+    }
+    return { v: 2, to, type, ciphertext: ciphertextBytes };
+  }
+
+  if (v !== 1 || type !== undefined || typeof nonce !== "string" || !MESSAGE_NONCE_PATTERN.test(nonce)) {
     return null;
   }
   const nonceBytes = decodeStrictBase64(nonce);
-  const ciphertextBytes = decodeStrictBase64(ciphertext);
-  if (nonceBytes === null || ciphertextBytes === null || ciphertextBytes.length < MIN_CIPHERTEXT_BYTES) {
+  if (nonceBytes === null) {
     return null;
   }
-  return { to, nonce: nonceBytes, ciphertext: ciphertextBytes };
+  return { v: 1, to, nonce: nonceBytes, ciphertext: ciphertextBytes };
 }
 
 /** How many undelivered messages the server will hold. */
@@ -121,13 +128,22 @@ export function messagesRouter(deps: MessagesDeps): Router {
     // both pass and overshoot by one; the limits are a bound on abuse, not
     // an exact quota.
     const inserted = await deps.pool.query<{ message_id: string; created_at: Date }>(
-      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext)
-       SELECT $1, $2, $3, $4
+      `INSERT INTO messages (from_user_id, to_user_id, nonce, ciphertext, v, msg_type)
+       SELECT $1, $2, $3, $4, $7, $8
        WHERE EXISTS (SELECT 1 FROM users WHERE user_id = $2)
          AND (SELECT count(*) FROM messages WHERE to_user_id = $2 AND from_user_id = $1) < $5
          AND (SELECT count(*) FROM messages WHERE to_user_id = $2) < $6
        RETURNING message_id, created_at`,
-      [from, envelope.to, envelope.nonce, envelope.ciphertext, queueLimits.perPair, queueLimits.perRecipient],
+      [
+        from,
+        envelope.to,
+        envelope.v === 1 ? envelope.nonce : null,
+        envelope.ciphertext,
+        queueLimits.perPair,
+        queueLimits.perRecipient,
+        envelope.v,
+        envelope.v === 2 ? envelope.type : null,
+      ],
     );
     const row = inserted.rows[0];
     if (row === undefined) {
@@ -172,10 +188,12 @@ export function messagesRouter(deps: MessagesDeps): Router {
     const result = await deps.pool.query<{
       message_id: string;
       from_user_id: string;
-      nonce: Buffer;
+      nonce: Buffer | null;
       ciphertext: Buffer;
       created_at: Date;
       micros: string;
+      v: number;
+      msg_type: number | null;
     }>(
       `WITH page AS (
          SELECT message_id FROM messages
@@ -188,7 +206,7 @@ export function messagesRouter(deps: MessagesDeps): Router {
          UPDATE messages SET delivered_at = now()
          WHERE message_id IN (SELECT message_id FROM page) AND delivered_at IS NULL
        )
-       SELECT m.message_id, m.from_user_id, m.nonce, m.ciphertext, m.created_at,
+       SELECT m.message_id, m.from_user_id, m.nonce, m.ciphertext, m.created_at, m.v, m.msg_type,
               (extract(epoch FROM m.created_at) * 1000000)::bigint::text AS micros
        FROM messages m JOIN page USING (message_id)
        ORDER BY m.created_at, m.message_id`,
@@ -199,8 +217,9 @@ export function messagesRouter(deps: MessagesDeps): Router {
       result.rows.map((row) => ({
         message_id: row.message_id,
         from: row.from_user_id,
-        v: 1,
-        nonce: row.nonce.toString("base64"),
+        v: row.v,
+        // v1 carries a nonce; v2 (ratchet) carries a type instead.
+        ...(row.nonce !== null ? { nonce: row.nonce.toString("base64") } : { type: row.msg_type }),
         ciphertext: row.ciphertext.toString("base64"),
         created_at: row.created_at.toISOString(),
         cursor: `${row.micros}_${row.message_id}`,

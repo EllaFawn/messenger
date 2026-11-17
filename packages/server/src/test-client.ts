@@ -1,5 +1,5 @@
 import * as crypto from "@messager/crypto";
-import { deriveUserId, signExchangeKey, signRequest } from "@messager/protocol";
+import { deriveUserId, signExchangeKey, signOneTimeKey, signRatchetKey, signRequest } from "@messager/protocol";
 import type { Pool } from "./db/pool.js";
 import { createInvite } from "./invites.js";
 
@@ -10,12 +10,44 @@ export interface TestIdentity {
   exchange: crypto.KeyPair;
   /** The identity key's signature over the exchange public key. */
   exchangeSig: Uint8Array;
+  /**
+   * A stand-in long-term ratchet public key. The server never does ratchet
+   * maths, so 32 random bytes with a valid signature are all it can tell apart.
+   */
+  ratchetKey: Uint8Array;
+  ratchetSig: Uint8Array;
+}
+
+export interface TestOneTimeKey {
+  id: string;
+  key: Uint8Array;
+  sig: Uint8Array;
+}
+
+/** Signed one-time keys for `who`, as their client would upload them. */
+export function makeOneTimeKeys(who: TestIdentity, count: number): TestOneTimeKey[] {
+  return Array.from({ length: count }, () => {
+    const key = crypto.randomBytes(32);
+    return {
+      id: crypto.toBase64Url(crypto.randomBytes(6)),
+      key,
+      sig: signOneTimeKey(who.ratchetKey, key, who.identity.privateKey),
+    };
+  });
+}
+
+/** The JSON form of a one-time key in request and response bodies. */
+export function oneTimeKeyJson(key: TestOneTimeKey): { id: string; key: string; sig: string } {
+  return { id: key.id, key: crypto.toBase64(key.key), sig: crypto.toBase64(key.sig) };
 }
 
 export function makeIdentity(): TestIdentity {
   const identity = crypto.generateIdentityKeyPair();
   const exchange = crypto.generateExchangeKeyPair();
+  const ratchetKey = crypto.randomBytes(32);
   return {
+    ratchetKey,
+    ratchetSig: signRatchetKey(ratchetKey, identity.privateKey),
     userId: deriveUserId(identity.publicKey),
     identity,
     exchange,
@@ -23,14 +55,19 @@ export function makeIdentity(): TestIdentity {
   };
 }
 
-export async function insertUser(pool: Pool, who: TestIdentity): Promise<void> {
+/** Inserts a user. By default with a ratchet key; pass `ratchet: false` for an account that has none yet. */
+export async function insertUser(pool: Pool, who: TestIdentity, options: { ratchet?: boolean } = {}): Promise<void> {
+  const withRatchet = options.ratchet ?? true;
   await pool.query(
-    "INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig) VALUES ($1, $2, $3, $4)",
+    `INSERT INTO users (user_id, identity_pubkey, exchange_pubkey, exchange_sig, ratchet_pubkey, ratchet_sig)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
     [
       who.userId,
       Buffer.from(who.identity.publicKey),
       Buffer.from(who.exchange.publicKey),
       Buffer.from(who.exchangeSig),
+      withRatchet ? Buffer.from(who.ratchetKey) : null,
+      withRatchet ? Buffer.from(who.ratchetSig) : null,
     ],
   );
 }

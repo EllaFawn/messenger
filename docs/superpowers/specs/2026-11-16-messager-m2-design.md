@@ -165,6 +165,15 @@ Signed statements stay domain-separated (`messager/v2/ratchet-key\n…`, `messag
 
 ### 5.5 Server changes
 
+Status: built (`feature/ratchet-server`), additively: static-key accounts and v1 messages keep working until the client has moved over, when a further migration makes the ratchet key required and removes the exchange key. As built:
+
+- A one-time key's signature covers the owner's long-term ratchet key as well as the one-time key, so a server cannot pair an old one-time key with a newer ratchet account.
+- The server verifies every uploaded key's signature and refuses the whole upload if any fails.
+- Uploads take at most 50 keys per request; at most 100 are held per user, plus one fallback key.
+- Claims are limited to 10 per hour per caller→target pair, and also count as key lookups.
+- `GET /users/:userID/pubkeys` also returns the ratchet key, its signature and `key_epoch`, so a client can re-check a pinned key without spending a one-time key.
+- The ratchet key is given at registration (optional for now). `PUT /keys/ratchet` is left to P4, the only place a key is ever replaced.
+
 ```sql
 ALTER TABLE users  -- replaces exchange_pubkey / exchange_sig
   ADD ratchet_pubkey bytea NOT NULL, ADD ratchet_sig bytea NOT NULL,

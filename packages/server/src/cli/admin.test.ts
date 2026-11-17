@@ -19,7 +19,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE one_time_keys, invites, messages, auth_nonces, users");
 });
 
 /** Runs a command the way the npm script does and captures what it prints. */

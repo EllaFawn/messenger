@@ -19,7 +19,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE one_time_keys, invites, messages, auth_nonces, users");
 });
 
 const SIG = Buffer.alloc(64, 3);
@@ -52,6 +52,7 @@ describe("initial schema", () => {
       "auth_nonces",
       "invites",
       "messages",
+      "one_time_keys",
       "schema_migrations",
       "users",
     ]);

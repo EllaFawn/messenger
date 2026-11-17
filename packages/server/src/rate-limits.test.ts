@@ -24,6 +24,7 @@ const LIMITS: RateLimits = {
   sendMessage: { limit: 2, windowMs: MINUTE },
   keyLookup: { limit: 2, windowMs: MINUTE },
   signed: { limit: 3, windowMs: MINUTE },
+  keyClaim: { limit: 2, windowMs: 60 * MINUTE },
 };
 
 let db: TestDatabase;
@@ -45,7 +46,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await db.pool.query("TRUNCATE invites, messages, auth_nonces, users");
+  await db.pool.query("TRUNCATE one_time_keys, invites, messages, auth_nonces, users");
   // Fresh limiters for every test.
   server = await startTestServer(createApp({ pool: db.pool, limiters: createLimiters(LIMITS), trustedProxies: 1 }));
   direct = await startTestServer(createApp({ pool: db.pool, limiters: createLimiters(LIMITS) }));
@@ -236,6 +237,7 @@ describe("defaults", () => {
       sendMessage: { limit: 60, windowMs: MINUTE },
       keyLookup: { limit: 30, windowMs: MINUTE },
       signed: { limit: 300, windowMs: MINUTE },
+      keyClaim: { limit: 10, windowMs: 60 * MINUTE },
     });
   });
 

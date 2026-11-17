@@ -36,7 +36,7 @@ describe("002_exchange_key_signature", () => {
     );
 
     const result = await migrate(db.pool);
-    expect(result.applied).toEqual(["002_exchange_key_signature.sql", "003_invites.sql"]);
+    expect(result.applied).toEqual(["002_exchange_key_signature.sql", "003_invites.sql", "004_ratchet_keys.sql"]);
 
     for (const table of ["users", "messages", "auth_nonces"]) {
       const rows = await db.pool.query(`SELECT count(*)::int AS n FROM ${table}`);
