@@ -24,3 +24,12 @@ export {
   EXCHANGE_KEY_SIGNATURE_BYTES,
 } from "./exchange-key-signature.js";
 export { computeSafetyNumber, keyFingerprint, type SafetyNumberKeys } from "./safety-number.js";
+export {
+  signRatchetKey,
+  verifyRatchetKey,
+  signOneTimeKey,
+  verifyOneTimeKey,
+  buildRatchetKeyStatement,
+  buildOneTimeKeyStatement,
+  RATCHET_PUBLIC_KEY_BYTES,
+} from "./ratchet-key-signature.js";
